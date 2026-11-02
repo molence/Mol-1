@@ -659,6 +659,8 @@ class TriangleAttention(nn.Module):
         Returns:
             [*, I, J, C_in] output tensor
         """
+        # The metal backend takes a single bias when there is no mask.
+        skip_mask = mask is None and triangle_attention == "metal"
         if mask is None:
             # [*, I, J]
             mask = x.new_ones(
@@ -672,16 +674,18 @@ class TriangleAttention(nn.Module):
         # [*, I, J, C_in]
         x = self.layer_norm(x)
 
-        # [*, I, 1, 1, J]
-        mask_bias = (self.inf * (mask - 1))[..., :, None, None, :]
-
         # [*, H, I, J]
         triangle_bias = permute_final_dims(self.linear(x), (2, 0, 1))
 
         # [*, 1, H, I, J]
         triangle_bias = triangle_bias.unsqueeze(-4)
 
-        biases = [mask_bias, triangle_bias]
+        if skip_mask:
+            biases = [triangle_bias]
+        else:
+            # [*, I, 1, 1, J]
+            mask_bias = (self.inf * (mask - 1))[..., :, None, None, :]
+            biases = [mask_bias, triangle_bias]
 
         if chunk_size is not None:
             x = self._chunk(

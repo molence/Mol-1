@@ -61,7 +61,18 @@ time and the PyTorch peak memory.
 | Setting | `mol pred` option | Values | Config default |
 | --- | --- | --- | --- |
 | `triangle_multiplicative` | `--trimul_kernel` | `auto`, `cuequivariance`, `flashpairformer`, `torch` | `cuequivariance` |
-| `triangle_attention` | `--triatt_kernel` | `auto`, `cuequivariance`, `triattention`, `torch` | `cuequivariance` |
+| `triangle_attention` | `--triatt_kernel` | `auto`, `cuequivariance`, `triattention`, `metal`, `torch` | `cuequivariance` |
+| `pairformer_backend` | `--pairformer_backend` | `torch`, `mlx` | `torch` |
+
+## Apple silicon
+
+`--triatt_kernel metal` and `--pairformer_backend mlx` are opt-in, FP32-only,
+inference-only options for `--device mps`. The MLX backend needs the `mlx`
+extra (`pip install "molence[mlx]"`).
+
+```bash
+mol pred -i input.json -o ./output --device mps -d fp32 --triatt_kernel metal --pairformer_backend mlx
+```
 
 The config defaults in [mol/config/base.py](../mol/config/base.py) are what
 `inference_demo.sh`, `finetune_demo.sh` and `mol/runner/train.py` use;

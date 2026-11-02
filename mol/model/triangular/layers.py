@@ -497,6 +497,7 @@ class Attention(nn.Module):
                 - "torch" (default): PyTorch native implementation
                 - "triattention": Optimized tri-attention module
                 - "cuequivariance": nvidia cuequivariance attention kernel
+                - "metal": Apple MPS (SDPA, or a Metal kernel when masked)
         Returns
             [*, Q, C_q] attention update
         """
@@ -504,6 +505,7 @@ class Attention(nn.Module):
             "torch",
             "triattention",
             "cuequivariance",
+            "metal",
         ]
 
         if biases is None:
@@ -511,14 +513,18 @@ class Attention(nn.Module):
 
         # The cuEquivariance kernel applies the scaling itself
         q, k, v = self._prep_qkv(
-            q_x, kv_x, apply_scale=triangle_attention in ["torch", "triattention"]
+            q_x, kv_x, apply_scale=triangle_attention in ["torch", "triattention", "metal"]
         )
 
-        if q.shape[-2] <= 16:
+        if q.shape[-2] <= 16 and triangle_attention != "metal":
             triangle_attention = "torch"
 
         if triangle_attention == "triattention":
             o = _tri_attention(q, k, v, biases)
+        elif triangle_attention == "metal":
+            from mol.model.triangular.mps_attention import mps_triangle_attention
+
+            o = mps_triangle_attention(q, k, v, biases)
         elif triangle_attention == "cuequivariance":
             # Notes:
             #     (1) Context is saved for backward pass. You don't need to save it manually.
