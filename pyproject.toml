@@ -95,6 +95,11 @@ cuda12 = [
 # to it.
 cpu = []
 
+# Apple-silicon Pairformer backend, selected with --pairformer_backend mlx.
+mlx = [
+  "mlx>=0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+]
+
 # Experiment tracking for fine-tuning runs. Imported lazily and only when
 # --use_wandb is set, which defaults to false, so it stays out of the base set.
 wandb = [
@@ -123,6 +128,7 @@ exclude = ["assets*", "docs*", "examples*", "scripts*", "tests*", "plans*"]
 # inside the wheel.
 mol = [
   "model/layer_norm/kernel/*",
+  "model/triangular/*.metal",
 ]
 
 [tool.setuptools.dynamic]

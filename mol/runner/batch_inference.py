@@ -290,6 +290,7 @@ def get_default_runner(
     use_msa: bool = True,
     trimul_kernel="auto",
     triatt_kernel="auto",
+    pairformer_backend: str = "torch",
     enable_fusion=True,
     enable_tf32=False,
     use_template: bool = False,
@@ -312,6 +313,7 @@ def get_default_runner(
         use_msa (bool): Whether to use MSA.
         trimul_kernel (str): Kernel for triangle multiplicative update.
         triatt_kernel (str): Kernel for triangle attention.
+        pairformer_backend (str): Pairformer stack backend (torch or mlx).
         enable_fusion (bool): Whether to enable diffusion transformer fusion.
         enable_tf32 (bool): Whether to enable TF32.
         use_template (bool): Whether to use templates.
@@ -348,6 +350,7 @@ def get_default_runner(
     configs.use_msa = use_msa
     configs.triangle_multiplicative = trimul_kernel
     configs.triangle_attention = triatt_kernel
+    configs.pairformer_backend = pairformer_backend
     configs.enable_efficient_fusion = enable_fusion
     configs.enable_tf32 = enable_tf32
     configs.use_template = use_template
@@ -365,6 +368,7 @@ def get_default_runner(
         f"Triangle_multiplicative kernel: {configs.triangle_multiplicative}, "
         f"Triangle_attention kernel: {configs.triangle_attention}"
     )
+    logger.info(f"Pairformer backend: {configs.pairformer_backend}")
     logger.info(
         f"diffusion_cache: {configs.diffusion_cache_mode}, "
         f"enable_efficient_fusion: {configs.enable_efficient_fusion}, "
@@ -387,6 +391,7 @@ def inference_jsons(
     model_name: str = "mol-1-base",
     trimul_kernel: str = "auto",
     triatt_kernel: str = "auto",
+    pairformer_backend: str = "torch",
     enable_fusion: bool = True,
     enable_tf32: bool = False,
     use_template: bool = False,
@@ -421,6 +426,7 @@ def inference_jsons(
         model_name (str): Registered Mol-1 configuration.
         trimul_kernel (str): Kernel for triangle multiplicative.
         triatt_kernel (str): Kernel for triangle attention.
+        pairformer_backend (str): Pairformer stack backend (torch or mlx).
         enable_fusion (bool): Enable efficient fusion.
         enable_tf32 (bool): Enable TF32.
         use_template (bool): Whether to use templates.
@@ -468,6 +474,7 @@ def inference_jsons(
         use_msa=use_msa,
         trimul_kernel=trimul_kernel,
         triatt_kernel=triatt_kernel,
+        pairformer_backend=pairformer_backend,
         enable_fusion=enable_fusion,
         enable_tf32=enable_tf32,
         use_template=use_template,
@@ -623,9 +630,18 @@ def mol_cli() -> None:
     type=str,
     default="auto",
     help=(
-        "Triangle attention kernel ('auto', 'triattention', 'cuequivariance' "
-        "or 'torch'). 'auto' picks cuequivariance on CUDA when it is "
+        "Triangle attention kernel ('auto', 'triattention', 'cuequivariance', "
+        "'metal' or 'torch'). 'auto' picks cuequivariance on CUDA when it is "
         "importable and torch otherwise."
+    ),
+)
+@click.option(
+    "--pairformer_backend",
+    type=click.Choice(["torch", "mlx"]),
+    default="torch",
+    help=(
+        "Pairformer stack backend. 'mlx' runs the stack with MLX on Apple "
+        "silicon (MPS inference only; needs the 'mlx' extra)."
     ),
 )
 @click.option(
@@ -742,6 +758,7 @@ def predict(
     use_default_params: bool,
     trimul_kernel: str,
     triatt_kernel: str,
+    pairformer_backend: str,
     enable_fusion: bool,
     enable_tf32: bool,
     use_template: bool,
@@ -777,6 +794,7 @@ def predict(
         use_default_params (bool): Use default parameters for the model.
         trimul_kernel (str): Kernel for triangle multiplicative.
         triatt_kernel (str): Kernel for triangle attention.
+        pairformer_backend (str): Pairformer stack backend (torch or mlx).
         enable_fusion (bool): Enable efficient fusion.
         enable_tf32 (bool): Enable TF32.
         use_template (bool): Use templates.
@@ -811,9 +829,9 @@ def predict(
     ], ("Invalid trimul_kernel. Options: 'auto', 'cuequivariance', 'torch', "
         "'flashpairformer'.")
     assert triatt_kernel in [
-        "auto", "triattention", "cuequivariance", "torch",
+        "auto", "triattention", "cuequivariance", "metal", "torch",
     ], ("Invalid triatt_kernel. Options: 'auto', 'triattention', "
-        "'cuequivariance', 'torch'.")
+        "'cuequivariance', 'metal', 'torch'.")
     seeds = list(map(int, seeds.split(",")))
 
     if use_template:
@@ -860,6 +878,7 @@ def predict(
         load_checkpoint_path=load_checkpoint_path,
         trimul_kernel=trimul_kernel,
         triatt_kernel=triatt_kernel,
+        pairformer_backend=pairformer_backend,
         enable_fusion=enable_fusion,
         enable_tf32=enable_tf32,
         use_template=use_template,

@@ -186,11 +186,20 @@ class Mol(nn.Module):
     def _triangle_attention_backend(self) -> str:
         """Use the same triangle-attention setting in training and inference."""
         backend = self.configs.triangle_attention
-        allowed = ("auto", "torch", "cuequivariance", "triattention")
+        allowed = ("auto", "torch", "cuequivariance", "triattention", "metal")
         if backend not in allowed:
             raise ValueError(f"triangle_attention={backend!r} is unsupported; choose from {allowed}")
         if backend == "auto":
             return resolve_auto_kernel("triangle_attention", self._device())
+        return backend
+
+    def _pairformer_backend(self) -> str:
+        backend = self.configs.pairformer_backend
+        allowed = ("torch", "mlx")
+        if backend not in allowed:
+            raise ValueError(f"pairformer_backend={backend!r} is unsupported; choose from {allowed}")
+        if backend == "mlx" and (self.training or self._device().type != "mps"):
+            raise RuntimeError("pairformer_backend='mlx' requires MPS inference")
         return backend
 
     def _device(self) -> torch.device:
@@ -334,21 +343,28 @@ class Mol(nn.Module):
                         pair_transition_chunk_size=msa_pair_transition_chunk_size,
                     )
                 s = s_init + self.linear_no_bias_s(self.layernorm_s(s))
-                s, z = self.pairformer_stack(
-                    s,
-                    z,
-                    pair_mask=None,
-                    triangle_multiplicative=self._triangle_multiplicative_backend(),
-                    triangle_attention=self._triangle_attention_backend(),
-                    inplace_safe=inplace_safe,
-                    chunk_size=chunk_size,
-                    pairmixer_transition_chunk_size=(
-                        pairmixer_transition_chunk_size
-                    ),
-                    pairformer_transition_chunk_size=(
-                        pairformer_transition_chunk_size
-                    ),
-                )
+                if self._pairformer_backend() == "mlx":
+                    from mol.model.triangular.mlx_pairformer import (
+                        run_mlx_pairformer_stack,
+                    )
+
+                    s, z = run_mlx_pairformer_stack(self.pairformer_stack, s, z)
+                else:
+                    s, z = self.pairformer_stack(
+                        s,
+                        z,
+                        pair_mask=None,
+                        triangle_multiplicative=self._triangle_multiplicative_backend(),
+                        triangle_attention=self._triangle_attention_backend(),
+                        inplace_safe=inplace_safe,
+                        chunk_size=chunk_size,
+                        pairmixer_transition_chunk_size=(
+                            pairmixer_transition_chunk_size
+                        ),
+                        pairformer_transition_chunk_size=(
+                            pairformer_transition_chunk_size
+                        ),
+                    )
 
         if self.train_confidence_only:
             self.input_embedder.train()

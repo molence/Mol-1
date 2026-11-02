@@ -135,6 +135,7 @@ model_configs = {
     # switch of kernels
     "triangle_multiplicative": "cuequivariance",  # training: cuequivariance/torch; inference also supports flashpairformer
     "triangle_attention": "cuequivariance",  # triattention, cuequivariance, torch
+    "pairformer_backend": "torch",  # torch or mlx (MPS inference only)
     "enable_diffusion_shared_vars_cache": False,
     "enable_efficient_fusion": False,
     "enable_tf32": False,
