@@ -21,12 +21,13 @@
 
 import os
 import shutil
-import traceback
+from pathlib import Path
 from typing import Sequence
 
 from mol.web_service.colab_request_utils import (
     parse_fasta_string,
     run_mmseqs2_service,
+    validate_msa_query,
 )
 
 # Public MMseqs2 endpoint of ColabFold.
@@ -65,12 +66,12 @@ class RequestParser(object):
         with open(tmp_fasta_fpath, "r") as f:
             query_seqs = f.read()
         host_url = COLABFOLD_SERVICE_HOST_URL
-        chain_dirs = {}
+        chain_dirs = []
         fasta_dict = parse_fasta_string(query_seqs)
         for i, (seq_name, seq) in enumerate(fasta_dict.items()):
             print(f"Searching MSA for {seq_name} with the sequence itself.")
-            try:
-                chain_dirs[i] = run_mmseqs2_service(
+            chain_dirs.append(
+                run_mmseqs2_service(
                     f">{seq_name}\n{seq}",
                     os.path.join(msa_res_dir, str(i)),
                     use_env=True,
@@ -83,36 +84,43 @@ class RequestParser(object):
                     user_agent="colabfold/1.5.5",
                     email=email,
                 )
-            except Exception:
-                print(
-                    "MMSEQS2 failed with the following error message:\n"
-                    f"{traceback.format_exc()}"
-                )
+            )
         if len(fasta_dict) > 1:
             complex_dir = os.path.join(msa_res_dir, "complex")
-            try:
-                run_mmseqs2_service(
-                    query_seqs,
-                    complex_dir,
-                    use_env=True,
-                    use_filter=True,
-                    use_templates=False,
-                    filter=None,
-                    use_pairing=True,
-                    pairing_strategy="greedy",
-                    host_url=host_url,
-                    user_agent="colabfold/1.5.5",
-                    email=email,
-                )
-            except Exception:
-                print(
-                    "MMSEQS2 failed with the following error message:\n"
-                    f"{traceback.format_exc()}"
+            run_mmseqs2_service(
+                query_seqs,
+                complex_dir,
+                use_env=True,
+                use_filter=True,
+                use_templates=False,
+                filter=None,
+                use_pairing=True,
+                pairing_strategy="greedy",
+                host_url=host_url,
+                user_agent="colabfold/1.5.5",
+                email=email,
+            )
+            paired_paths = [
+                os.path.join(complex_dir, str(i), "pairing.a3m")
+                for i in range(len(chain_dirs))
+            ]
+            # Check all sources before replacing any returned paired file.
+            for paired, seq in zip(paired_paths, fasta_dict.values()):
+                validate_msa_query(paired, seq)
+            if set(Path(complex_dir).glob("*/pairing.a3m")) != {
+                Path(path) for path in paired_paths
+            }:
+                raise ValueError(
+                    "ColabFold paired MSA query set does not match the request. "
+                    "Use a new result directory."
                 )
             # The paired search writes complex/<i>/pairing.a3m; the input JSON
             # takes each chain's MSAs from that chain's own result directory.
-            for i, chain_dir in chain_dirs.items():
-                paired = os.path.join(complex_dir, str(i), "pairing.a3m")
-                if os.path.exists(paired):
-                    shutil.copyfile(paired, os.path.join(chain_dir, "pairing.a3m"))
-        return [chain_dirs[i] for i in sorted(chain_dirs)]
+            for paired, chain_dir in zip(paired_paths, chain_dirs):
+                shutil.copyfile(paired, os.path.join(chain_dir, "pairing.a3m"))
+        elif os.path.exists(os.path.join(chain_dirs[0], "pairing.a3m")):
+            raise ValueError(
+                "Cached paired MSA output does not match a single-chain search. "
+                "Use a new result directory."
+            )
+        return chain_dirs

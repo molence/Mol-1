@@ -25,11 +25,11 @@ from mol.web_service import colab_request_parser
 def fake_service(x, prefix, use_pairing=False, **kwargs):
     """Write what the ColabFold client writes, without contacting a server."""
     if use_pairing:
-        n = x.count(">")
-        for i in range(n):
+        sequences = x.splitlines()[1::2]
+        for i, sequence in enumerate(sequences):
             os.makedirs(os.path.join(prefix, str(i)), exist_ok=True)
             with open(os.path.join(prefix, str(i), "pairing.a3m"), "w") as f:
-                f.write(f">query\nSEQ{i}\n>UniRef100_A_1/\nSEQ{i}\n")
+                f.write(f">query\n{sequence}\n>UniRef100_A_1/\n{sequence}\n")
         return None
     query_id = str(int(x.split("\n")[0].split("_")[-1]))
     out = os.path.join(prefix, query_id)
