@@ -40,6 +40,7 @@ from mol.config.model_type import model_configs
 from mol.config.parser import parse_configs, parse_sys_args
 from mol.data.inference.infer_dataloader import get_inference_dataloader
 from mol.model.mol import Mol
+from mol.model.triangular.layers import skip_trunc_normal_init
 from mol.utils.distributed import DIST_WRAPPER
 from mol.utils.seed import seed_everything
 from mol.utils.torch_utils import to_device
@@ -115,7 +116,12 @@ class InferenceRunner(object):
         """
         Initialize the Mol-1 model and move it to the appropriate device.
         """
-        self.model = Mol(self.configs).to(self.device)
+        if self.configs.load_strict:
+            # Every weight comes from the checkpoint; skip the slow random init.
+            with skip_trunc_normal_init():
+                self.model = Mol(self.configs).to(self.device)
+        else:
+            self.model = Mol(self.configs).to(self.device)
 
     def load_checkpoint(self) -> None:
         """

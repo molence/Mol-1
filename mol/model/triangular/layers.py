@@ -20,6 +20,7 @@
 # Changes: Automatic triangle-kernel selection from the device and the kernels available.
 # Copyright 2021 AlQuraishi Laboratory
 
+import contextlib
 import functools
 import importlib
 import logging
@@ -119,9 +120,27 @@ def _calculate_fan(
     return f
 
 
+_SKIP_TRUNC_NORMAL_INIT = False
+
+
+@contextlib.contextmanager
+def skip_trunc_normal_init():
+    """Skip the truncated-normal weight init while building a model whose
+    weights are about to be overwritten by a strict checkpoint load. The
+    SciPy sampler takes ~45 s for Mol-1's 577M parameters."""
+    global _SKIP_TRUNC_NORMAL_INIT
+    previous, _SKIP_TRUNC_NORMAL_INIT = _SKIP_TRUNC_NORMAL_INIT, True
+    try:
+        yield
+    finally:
+        _SKIP_TRUNC_NORMAL_INIT = previous
+
+
 def trunc_normal_init_(
     weights: torch.Tensor, scale: float = 1.0, fan: str = "fan_in"
 ) -> None:
+    if _SKIP_TRUNC_NORMAL_INIT:
+        return
     shape = weights.shape
     f = _calculate_fan(shape, fan)
     scale = scale / max(1, f)
