@@ -45,6 +45,9 @@ _TRI_PAD_MULTIPLE = int(os.getenv("MOL_TRI_PAD", "8"))
 # Inference fast path for TriangleAttention with cuEquivariance
 # (see TriangleAttention._fused_inference_forward). MOL_FUSED_TRI_ATT=0 disables.
 _FUSED_TRI_ATT = os.getenv("MOL_FUSED_TRI_ATT", "1") != "0"
+# cuBLAS-based triangle multiplication at inference (fast_trimul.py).
+# MOL_FAST_TRIMUL=0 disables.
+_FAST_TRIMUL = os.getenv("MOL_FAST_TRIMUL", "1") != "0"
 
 
 def _tri_pad_amount(x: torch.Tensor) -> int:
@@ -231,6 +234,37 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
         _outgoing:
             Whether this is an outgoing update. Defaults to True.
     """
+
+    def _fast_trimul_ok(self, z: torch.Tensor) -> bool:
+        return (
+            _FAST_TRIMUL
+            and z.is_cuda
+            and z.dim() == 3
+            and z.dtype in (torch.bfloat16, torch.float16)
+            and not torch.is_grad_enabled()
+            and z.shape[-2] > 16
+        )
+
+    def _fast_trimul_weights(self, dtype: torch.dtype) -> tuple:
+        params = (
+            self.layer_norm_in.weight,
+            self.layer_norm_in.bias,
+            self.linear_a_g.weight,
+            self.linear_b_g.weight,
+            self.linear_a_p.weight,
+            self.linear_b_p.weight,
+            self.layer_norm_out.weight,
+            self.layer_norm_out.bias,
+            self.linear_z.weight,
+            self.linear_g.weight,
+        )
+        key = (dtype, tuple((p.data_ptr(), p._version) for p in params))
+        cached = getattr(self, "_fast_w_cache", None)
+        if cached is None or cached[0] != key:
+            p = [t.to(dtype) for t in params]
+            weights = (p[0], p[1], torch.cat(p[2:6], 0), p[6], p[7], p[8], p[9])
+            self._fast_w_cache = (key, weights)
+        return self._fast_w_cache[1]
 
     def __init__(self, c_z: int, c_hidden: int, _outgoing: bool = True) -> None:
         super(TriangleMultiplicativeUpdate, self).__init__(
@@ -525,6 +559,24 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
             if pad:
                 z = F.pad(z, (0, 0, 0, pad, 0, pad))
                 mask = F.pad(mask, (0, pad, 0, pad))
+            if self._fast_trimul_ok(z):
+                from mol.model.triangular import fast_trimul
+
+                add_residual = _input_inplace_safe and _add_with_inplace
+                fuse_residual = add_residual and not pad
+                out = fast_trimul.triangle_multiplicative_update(
+                    z,
+                    "outgoing" if self._outgoing else "incoming",
+                    mask.reshape(z.shape[:-1]),
+                    *self._fast_trimul_weights(z.dtype),
+                    eps=1e-5,
+                    residual=z_in if fuse_residual else None,
+                )
+                if pad:
+                    out = out[..., :n_tok, :n_tok, :]
+                if add_residual and not fuse_residual:
+                    out = out + z_in
+                return out
             z = kernel_triangular_mult(
                 z[None],
                 direction="outgoing" if self._outgoing else "incoming",
