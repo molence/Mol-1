@@ -21,7 +21,8 @@ tensors (trunk outputs, caches), so the step is captured once and replayed.
 Only the noisy coordinates and the noise level change; they are copied into
 the captured input buffers before each replay.
 
-Enabled for CUDA inference without autocast; ``MOL_DIFFUSION_CUDA_GRAPH=0``
+Under autocast the step runs with the autocast weight-cast cache disabled, so
+the casts are captured as ordinary kernels. ``MOL_DIFFUSION_CUDA_GRAPH=0``
 disables it, and ``MOL_DIFFUSION_CUDA_GRAPH=check`` also runs every replayed
 step eagerly and prints the difference (debugging only).
 """
@@ -37,7 +38,6 @@ def diffusion_graph_enabled(x: torch.Tensor) -> bool:
         os.getenv("MOL_DIFFUSION_CUDA_GRAPH", "1") != "0"
         and x.is_cuda
         and not torch.is_grad_enabled()
-        and not torch.is_autocast_enabled("cuda")
     )
 
 
@@ -56,9 +56,15 @@ class GraphedDenoiseStep:
         self.key = None
 
     def _run(self, x_noisy: torch.Tensor, t_hat: torch.Tensor) -> torch.Tensor:
-        return self.denoise_net(
-            x_noisy=x_noisy, t_hat_noise_level=t_hat, **self.constant_kwargs
-        )
+        with torch.autocast(
+            "cuda",
+            dtype=torch.get_autocast_dtype("cuda"),
+            enabled=torch.is_autocast_enabled("cuda"),
+            cache_enabled=False,
+        ):
+            return self.denoise_net(
+                x_noisy=x_noisy, t_hat_noise_level=t_hat, **self.constant_kwargs
+            )
 
     def __call__(self, x_noisy: torch.Tensor, t_hat: torch.Tensor) -> torch.Tensor:
         key = (x_noisy.shape, x_noisy.dtype, t_hat.shape, t_hat.dtype)

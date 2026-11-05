@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--input", default=os.path.join(REPO, "examples/examples_with_template/example_9fm7.json"))
     ap.add_argument("--out", default=os.path.join(REPO, "bench/results"))
     ap.add_argument("--seed", type=int, default=101)
+    ap.add_argument("--bf16-diffusion", action="store_true", help="run sample_diffusion under BF16 autocast")
+    ap.add_argument("--bf16-confidence", action="store_true", help="run the confidence head under BF16 autocast")
     args, extra = ap.parse_known_args()
     extra = [e for e in extra if e != "--"]
 
@@ -146,6 +148,10 @@ def main():
     assert not err, err
     n_tok = data["N_token"].item()
     runner.update_model_configs(inf.update_inference_configs(configs, n_tok))
+    if args.bf16_diffusion:
+        runner.model.configs.skip_amp.sample_diffusion = False
+    if args.bf16_confidence:
+        runner.model.configs.skip_amp.confidence_head = False
 
     results = []
     pred = None

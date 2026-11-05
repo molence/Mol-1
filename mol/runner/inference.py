@@ -369,6 +369,10 @@ def update_inference_configs(configs: Any, n_token: int) -> Any:
     else:
         configs.skip_amp.confidence_head = True
         configs.skip_amp.sample_diffusion = True
+    if getattr(configs, "bf16_confidence_head", False):
+        configs.skip_amp.confidence_head = False
+    if getattr(configs, "bf16_sample_diffusion", False):
+        configs.skip_amp.sample_diffusion = False
 
     return configs
 
