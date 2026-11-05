@@ -25,11 +25,34 @@ from abc import ABC, abstractmethod
 from functools import partial, partialmethod
 from typing import List, Optional
 
+import os
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from mol.model.triangular.layers import Attention, LayerNorm, OpenfoldLinear
 from mol.model.utils import chunk_layer, is_fp16_enabled, permute_final_dims
+
+
+# Inference-only padding of the pair representation for the cuEquivariance
+# triangle kernels. On Blackwell, triangle attention only takes the SM100f path
+# when the token count is a multiple of 8, and both kernels tile better on
+# aligned sizes. Padded rows/columns are masked out and sliced off, so the
+# result for the real tokens is unchanged. MOL_TRI_PAD=0 disables it.
+_TRI_PAD_MULTIPLE = int(os.getenv("MOL_TRI_PAD", "8"))
+
+
+def _tri_pad_amount(x: torch.Tensor) -> int:
+    """Rows/columns to append to a square [*, N, N, C] pair tensor, or 0."""
+    if (
+        _TRI_PAD_MULTIPLE <= 0
+        or not x.is_cuda
+        or torch.is_grad_enabled()
+        or x.shape[-2] != x.shape[-3]
+    ):
+        return 0
+    return (-x.shape[-2]) % _TRI_PAD_MULTIPLE
 
 
 def kernel_triangular_mult(
@@ -484,10 +507,17 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
         if triangle_multiplicative == "cuequivariance" and (self.c_z == self.c_hidden):
             if _input_inplace_safe and _add_with_inplace:
                 z_in = z.clone()
+            if mask is None:
+                mask = z.new_ones(z.shape[:-1])[None]
+            n_tok = z.shape[-2]
+            pad = _tri_pad_amount(z)
+            if pad:
+                z = F.pad(z, (0, 0, 0, pad, 0, pad))
+                mask = F.pad(mask, (0, pad, 0, pad))
             z = kernel_triangular_mult(
                 z[None],
                 direction="outgoing" if self._outgoing else "incoming",
-                mask=z.new_ones(z.shape[:-1])[None] if mask is None else mask,
+                mask=mask,
                 norm_in_weight=self.layer_norm_in.weight,
                 norm_in_bias=self.layer_norm_in.bias,
                 p_in_weight=torch.cat(
@@ -502,6 +532,8 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
                 g_out_weight=self.linear_g.weight,
                 eps=1e-5,  # In BF16, we use the default eps of 1e-5.
             )[0]
+            if pad:
+                z = z[..., :n_tok, :n_tok, :]
             if _input_inplace_safe and _add_with_inplace:
                 return z + z_in
             else:
@@ -665,6 +697,12 @@ class TriangleAttention(nn.Module):
                 x.shape[:-1],
             )
 
+        n_tok = x.shape[-2]
+        pad = _tri_pad_amount(x) if triangle_attention == "cuequivariance" else 0
+        if pad:
+            x = F.pad(x, (0, 0, 0, pad, 0, pad))
+            mask = F.pad(mask, (0, pad, 0, pad))
+
         if not self.starting:
             x = x.transpose(-2, -3)
             mask = mask.transpose(-1, -2)
@@ -701,6 +739,9 @@ class TriangleAttention(nn.Module):
 
         if not self.starting:
             x = x.transpose(-2, -3)
+
+        if pad:
+            x = x[..., :n_tok, :n_tok, :]
 
         return x
 

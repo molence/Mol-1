@@ -147,3 +147,7 @@ test_outputs/
 esm_embeddings/
 scripts/msa/data/pdb_seqs/
 scripts/msa/data/mmcif_msa*/
+
+# perf bench outputs
+bench/results/
+bench/logs/
