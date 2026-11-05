@@ -19,6 +19,7 @@
 # Upstream file: protenix/model/modules/primitives.py
 
 import math
+import os
 from functools import partial
 from typing import Any, Optional, Union
 
@@ -169,6 +170,12 @@ class BiasInitLinear(Linear):
             nn.init.constant_(tensor=self.bias, val=biasinit)
 
 
+# Inference fast path for large Transition inputs (Transition._fused_eval).
+# MOL_FUSED_TRANSITION=0 disables.
+_FUSED_TRANSITION = os.getenv("MOL_FUSED_TRANSITION", "1") != "0"
+_FUSED_TRANSITION_MIN_ROWS = 262144
+
+
 class Transition(nn.Module):
     """
     Implements Algorithm 11 in AF3
@@ -192,6 +199,56 @@ class Transition(nn.Module):
         self.linear_no_bias = LinearNoBias(
             in_features=n * c_in, out_features=c_in, initializer="zeros"
         )
+
+    def _fused_eval_ok(self, x: torch.Tensor) -> bool:
+        return (
+            _FUSED_TRANSITION
+            and x.is_cuda
+            and not torch.is_grad_enabled()
+            and x.numel() // self.c_in >= 65536
+        )
+
+    def _fused_weights(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        weights = (
+            self.linear_no_bias_a.weight,
+            self.linear_no_bias_b.weight,
+            self.linear_no_bias.weight,
+        )
+        key = (dtype, tuple((w.data_ptr(), w._version) for w in weights))
+        cached = getattr(self, "_fused_w_cache", None)
+        if cached is None or cached[0] != key:
+            w_ab = torch.cat(weights[:2], 0).to(dtype)
+            self._fused_w_cache = (key, (w_ab, weights[2].to(dtype)))
+        return self._fused_w_cache[1]
+
+    def _fused_eval(self, x: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
+        """Inference path for large inputs: one GEMM for both up-projections,
+        a fused SwiGLU kernel, and contiguous row chunks (bounded by
+        ``chunk_size`` along the penultimate dimension, but never below
+        ``_FUSED_TRANSITION_MIN_ROWS`` rows, below which it gets slower)."""
+        from mol.model.modules.triton_swiglu import silu_mul
+
+        x2 = x.reshape(-1, self.c_in)
+        rows = x2.shape[0]
+        per = rows
+        if chunk_size is not None:
+            per = max(_FUSED_TRANSITION_MIN_ROWS, int(chunk_size) * (rows // x.shape[-2]))
+        dtype = (
+            torch.get_autocast_dtype("cuda")
+            if torch.is_autocast_enabled("cuda")
+            else x.dtype
+        )
+        w_ab, w_o = self._fused_weights(dtype)
+        out = torch.empty((rows, self.c_in), device=x.device, dtype=dtype)
+        with torch.amp.autocast("cuda", enabled=False):
+            for start in range(0, rows, per):
+                y = self.layernorm1(x2[start : start + per]).to(dtype)
+                torch.mm(
+                    silu_mul(torch.mm(y, w_ab.t())),
+                    w_o.t(),
+                    out=out[start : start + per],
+                )
+        return out.view(*x.shape[:-1], self.c_in).to(x.dtype)
 
     def _eval_chunk(self, chunk: torch.Tensor) -> torch.Tensor:
         # Preserve LN, separate GEMMs, tensor shapes, and output casting.
@@ -227,6 +284,8 @@ class Transition(nn.Module):
             x = self.linear_no_bias(F.silu(a) * b)
             return x
         else:
+            if self._fused_eval_ok(x):
+                return self._fused_eval(x, chunk_size)
             other_dims = x.shape[:-1]
             dim_size = x.shape[-1]
             size = x.shape[-2]
