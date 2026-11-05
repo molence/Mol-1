@@ -201,6 +201,8 @@ that every prediction logs, and every chunking control. When a system does not
 fit, the error names the settings to turn. When it fits with room to spare,
 `--infer_setting.sample_diffusion_chunk_size 5` denoises the five samples
 together instead of one at a time, which is faster.
+[docs/performance.md](docs/performance.md) has timings and the flags that
+make prediction fastest.
 
 **Large inputs.** The defaults fit inputs of up to about 1,500 tokens on a
 95 GiB GPU. Larger ones, such as the biggest systems in FoldBench, need the
