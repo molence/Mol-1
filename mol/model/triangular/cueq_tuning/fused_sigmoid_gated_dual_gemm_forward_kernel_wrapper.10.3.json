@@ -1,0 +1,722 @@
+{
+ "147456_128_64_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.02607935905456543
+ },
+ "147456_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 64,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.05570265579223633
+ },
+ "147456_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.0933560333251953
+ },
+ "147456_320_320_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.17174118041992187
+ },
+ "147456_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.4825766296386719
+ },
+ "147456_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.9713624267578125
+ },
+ "147456_448_448_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.3074783935546875
+ },
+ "147456_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.9138268432617187
+ },
+ "147456_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 1.85838623046875
+ },
+ "147456_640_320_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.22148300170898438
+ },
+ "147456_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.6710313110351562
+ },
+ "147456_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 1.5293472900390626
+ },
+ "147456_64_64_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.024055295944213868
+ },
+ "147456_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.03571468734741211
+ },
+ "147456_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.05734809494018555
+ },
+ "147456_896_448_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.36613323974609374
+ },
+ "147456_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 1.2028599853515625
+ },
+ "147456_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 2.905535400390625
+ },
+ "25600_128_64_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.02576076889038086
+ },
+ "25600_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 64,
+   "TILE_N": 128,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.02575667190551758
+ },
+ "25600_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 32,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.025624576568603515
+ },
+ "25600_320_320_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.027084928512573242
+ },
+ "25600_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.09875456237792969
+ },
+ "25600_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.1995653076171875
+ },
+ "25600_448_448_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.042853633880615236
+ },
+ "25600_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.1753579559326172
+ },
+ "25600_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.35029336547851564
+ },
+ "25600_640_320_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.0421077766418457
+ },
+ "25600_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.12326502227783204
+ },
+ "25600_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.27840921020507814
+ },
+ "25600_64_64_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 32,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.02356800079345703
+ },
+ "25600_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 32,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.02345881652832031
+ },
+ "25600_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.022734975814819335
+ },
+ "25600_896_448_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.06593446350097656
+ },
+ "25600_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.22300376892089843
+ },
+ "25600_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.5348311157226563
+ },
+ "262144_128_64_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.04305433654785156
+ },
+ "262144_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.0947240982055664
+ },
+ "262144_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.16200909423828125
+ },
+ "262144_320_320_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.29499508666992186
+ },
+ "262144_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.8518380737304687
+ },
+ "262144_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 1.7105059814453125
+ },
+ "262144_448_448_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.534582275390625
+ },
+ "262144_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 1.6105850830078126
+ },
+ "262144_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 3.2678994140625
+ },
+ "262144_640_320_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.38664306640625
+ },
+ "262144_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 1.1882862548828126
+ },
+ "262144_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 2.704544921875
+ },
+ "262144_64_64_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 64,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.02723967933654785
+ },
+ "262144_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.05816729736328125
+ },
+ "262144_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.09730150604248047
+ },
+ "262144_896_448_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.6410127563476562
+ },
+ "262144_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 2.12172216796875
+ },
+ "262144_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 5.1406806640625
+ },
+ "65536_128_64_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.02621683120727539
+ },
+ "65536_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.026524032592773437
+ },
+ "65536_128_64_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.046212352752685544
+ },
+ "65536_320_320_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.0649543685913086
+ },
+ "65536_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.22127513122558592
+ },
+ "65536_320_320_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.45084262084960935
+ },
+ "65536_448_448_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.14200408935546874
+ },
+ "65536_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.41003826904296875
+ },
+ "65536_448_448_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.8387606811523437
+ },
+ "65536_640_320_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.09749696350097656
+ },
+ "65536_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.301188232421875
+ },
+ "65536_640_320_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.6795286865234375
+ },
+ "65536_64_64_torch.float16_torch.float16_torch.float16_torch.float16_torch.float16_True_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 64,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.023724544525146486
+ },
+ "65536_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32": {
+  "config": {
+   "TILE_M": 64,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "time": 0.023572864532470702
+ },
+ "65536_64_64_torch.float32_torch.float32_torch.float32_torch.float32_torch.float32_True_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 64,
+   "TILE_N": 64,
+   "TILE_K": 16,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 0.029828224182128906
+ },
+ "65536_896_448_torch.float16_None_torch.float16_torch.float16_torch.float16_False_False_False_default": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 4
+  },
+  "time": 0.15800729370117186
+ },
+ "65536_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 128,
+   "TILE_K": 32,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "time": 0.5400985717773438
+ },
+ "65536_896_448_torch.float32_None_torch.float32_torch.float32_torch.float32_False_False_False_tf32x3": {
+  "config": {
+   "TILE_M": 128,
+   "TILE_N": 64,
+   "TILE_K": 32,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "time": 1.301283935546875
+ }
+}

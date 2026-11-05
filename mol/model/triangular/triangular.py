@@ -71,6 +71,10 @@ def kernel_triangular_mult(
 ) -> torch.Tensor:
     from cuequivariance_torch.primitives.triangle import triangle_multiplicative_update
 
+    from mol.model.triangular import cueq_tuning
+
+    cueq_tuning.install(x.device)
+
     """
         This function performs a triangle multiplicative update operation, which is a key component
     in the AlphaFold2 architecture. The operation consists of:
