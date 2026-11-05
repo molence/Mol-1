@@ -19,6 +19,7 @@
 # Upstream file: protenix/model/modules/transformer.py
 # Changes: Projected pair-bias cache shared across denoising steps and sample chunks.
 
+import os
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable, Optional, Union
@@ -50,6 +51,11 @@ class ProjectedPairBiases:
     """Detached per-block pair biases prepared for a DiffusionTransformer."""
 
     blocks: tuple[torch.Tensor, ...]
+
+
+# Fused LayerNorm + head projection for large pair biases at inference
+# (pair_bias.py). MOL_FUSED_PAIR_BIAS=0 disables.
+_FUSED_PAIR_BIAS = os.getenv("MOL_FUSED_PAIR_BIAS", "1") != "0"
 
 
 class AttentionPairBias(nn.Module):
@@ -131,6 +137,29 @@ class AttentionPairBias(nn.Module):
             raise ValueError(
                 "z must be a raw channel-last pair tensor with shape "
                 f"[..., N_query, N_key, {self.linear_nobias_z.in_features}]"
+            )
+        if (
+            _FUSED_PAIR_BIAS
+            and z.is_cuda
+            and z.dim() == 3
+            and not torch.is_grad_enabled()
+            and z.shape[0] * z.shape[1] >= 65536
+            and self.n_heads >= 16
+            and self.n_heads & (self.n_heads - 1) == 0
+        ):
+            from mol.model.modules.pair_bias import layer_norm_head_projection
+
+            return layer_norm_head_projection(
+                z,
+                self.layernorm_z.weight,
+                self.layernorm_z.bias,
+                self.linear_nobias_z.weight,
+                self.layernorm_z.eps,
+                out_dtype=(
+                    torch.get_autocast_dtype("cuda")
+                    if torch.is_autocast_enabled("cuda")
+                    else z.dtype
+                ),
             )
         bias = self.linear_nobias_z(self.layernorm_z(z))
         return permute_final_dims(bias, [2, 0, 1])
