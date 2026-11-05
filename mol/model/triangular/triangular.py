@@ -510,9 +510,12 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
         # This situation may occur in our template module.
         if triangle_multiplicative == "cuequivariance" and (self.c_z == self.c_hidden):
             if _input_inplace_safe and _add_with_inplace:
-                z_in = z.clone()
+                # The kernel does not write to its input, so no clone needed.
+                z_in = z
             if mask is None:
-                mask = z.new_ones(z.shape[:-1])[None]
+                mask = z.new_ones(z.shape[:-1])
+            if mask.dim() == z.dim() - 1:
+                mask = mask[None]
             n_tok = z.shape[-2]
             pad = _tri_pad_amount(z)
             if pad:

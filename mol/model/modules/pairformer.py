@@ -32,6 +32,7 @@ from mol.model.modules.primitives import LinearNoBias, Transition
 from mol.model.modules.transformer import AttentionPairBias
 from mol.model.modules.fused_ops import dropout_add_rowwise
 from mol.model.triangular.layers import DropoutRowwise, LayerNorm, OuterProductMean
+from mol.model.triangular.triangular import _tri_pad_amount
 from mol.model.triangular.triangular import (
     TriangleAttention,
     TriangleMultiplicationIncoming,
@@ -43,6 +44,13 @@ from mol.model.utils import (
     get_checkpoint_fn,
     sample_msa_feature_dict_random_without_replacement,
 )
+
+
+def _unpad_pair(z: torch.Tensor, n_token: int) -> torch.Tensor:
+    """View of the real tokens of a pair tensor padded by PairformerStack."""
+    if z.shape[-2] == n_token:
+        return z
+    return z[..., :n_token, :n_token, :]
 
 
 class PairformerBlock(nn.Module):
@@ -228,7 +236,7 @@ class PairformerBlock(nn.Module):
             s = s + self.attention_pair_bias(
                 a=s,
                 s=None,
-                z=z,
+                z=_unpad_pair(z, s.shape[-2]),
             )
             s = s + self.single_transition(s)
         return s, z
@@ -334,7 +342,7 @@ class PairMixerBlock(nn.Module):
             s = s + self.attention_pair_bias(
                 a=s,
                 s=None,
-                z=z,
+                z=_unpad_pair(z, s.shape[-2]),
             )
             s = s + self.single_transition(s)
         return s, z
@@ -556,6 +564,21 @@ class PairformerStack(nn.Module):
                 [..., N_token, c_s]
                 [..., N_token, N_token, c_z]
         """
+        # Pad the pair tensor once for the whole stack instead of in every
+        # triangle op (see _tri_pad_amount); padded pairs are masked out.
+        n_token = z.shape[-2]
+        pad = (
+            _tri_pad_amount(z)
+            if z.dim() == 3
+            and "cuequivariance" in (triangle_multiplicative, triangle_attention)
+            else 0
+        )
+        if pad:
+            z = F.pad(z, (0, 0, 0, pad, 0, pad))
+            if pair_mask is None:
+                pair_mask = z.new_ones((n_token, n_token))
+            pair_mask = F.pad(pair_mask, (0, pad, 0, pad))
+
         blocks = self._prep_blocks(
             pair_mask=pair_mask,
             triangle_multiplicative=triangle_multiplicative,
@@ -574,6 +597,8 @@ class PairformerStack(nn.Module):
             args=(s, z),
             blocks_per_ckpt=blocks_per_ckpt,
         )
+        if pad:
+            z = z[..., :n_token, :n_token, :].contiguous()
         return s, z
 
 
