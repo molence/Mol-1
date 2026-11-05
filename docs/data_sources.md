@@ -78,14 +78,16 @@ the input JSON already carries MSA paths —
 
 ## Model weights
 
-The weights resolve in this order, the first that applies winning:
+`mol cpred` uses `mol-1-constraint.pt`; `mol pred` uses `mol-1-base.pt`.
+Weights resolve in this order, the first that applies winning:
 
 1. `--load_checkpoint_path` — used as given. It must exist: naming a file says
    which weights to use, so fetching different ones instead would be wrong.
-2. `$MOL_ROOT_DIR/checkpoint/mol-1-base.pt` — used if it is there.
+2. `$MOL_ROOT_DIR/checkpoint/<model_name>.pt` — used if it is there.
 3. Otherwise they are downloaded to that path from
-   `https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-base.pt`
-   (2.2 GB).
+   [constraint checkpoint](https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-constraint.pt)
+   or [base checkpoint](https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-base.pt),
+   according to the selected model.
 
 A download is verified by loading it before use; a truncated file is deleted
 rather than left to fail later as an unintelligible unpickling error. Nothing

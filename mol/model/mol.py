@@ -211,6 +211,10 @@ class Mol(nn.Module):
             return fallback
         return configured
 
+    def get_constraint_update(self, input_feature_dict):
+        """Return an optional pair update; the base model applies no constraints."""
+        return None
+
     def get_pairformer_output(
         self,
         input_feature_dict: dict[str, Any],
@@ -256,6 +260,8 @@ class Mol(nn.Module):
             input_feature_dict, inplace_safe=False, chunk_size=chunk_size
         )  # [..., N_token, 449]
 
+        z_constraint = self.get_constraint_update(input_feature_dict)
+
         s_init = self.linear_no_bias_sinit(s_inputs)  # [..., N_token, c_s]
         z_init = (
             self.linear_no_bias_zinit1(s_init)[..., None, :]
@@ -273,6 +279,11 @@ class Mol(nn.Module):
             z_init = z_init + self.linear_no_bias_token_bond(
                 input_feature_dict["token_bonds"].unsqueeze(dim=-1)
             )
+        if z_constraint is not None:
+            if inplace_safe:
+                z_init += z_constraint
+            else:
+                z_init = z_init + z_constraint
         # Line 6
         z = torch.zeros_like(z_init)
         s = torch.zeros_like(s_init)

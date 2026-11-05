@@ -93,7 +93,7 @@ The module can be run on its own:
 python3 -m mol.runner.rna_msa_search
 ```
 
-That searches one bundled example sequence and writes the result under `./output`; `mol prep --use_rna_msa true` and `mol pred --use_rna_msa true` run the search for the RNA chains of an input JSON that have no `unpairedMsaPath`.
+That searches one bundled example sequence and writes the result under `./output`; `mol prep --use_rna_msa true` and `mol cpred --use_rna_msa true` run the search for the RNA chains of an input JSON that have no `unpairedMsaPath`.
 
 The pipeline searches across three major RNA databases. You can use the clustered versions of the databases released by AlphaFold 3, available zstd-compressed (decompress with `zstd -d`) from `https://storage.googleapis.com/alphafold-databases/v3.0/<file name>.zst`, or provide your own custom databases:
 1. **Rfam**: `rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta`
@@ -104,7 +104,7 @@ The databases are read from `$MOL_ROOT_DIR/search_database/` under the file name
 
 ### Output
 
-The search results from all databases are merged, deduplicated, and saved as `rna_msa.a3m`. `mol prep` and `mol pred` write it to `<out_dir>/<job>/rna_msa/<entity index>/rna_msa.a3m`, where the entity index is the 0-based position in `sequences`, and fill it in as the chain's `unpairedMsaPath`; it is used only with `--use_rna_msa true`.
+The search results from all databases are merged, deduplicated, and saved as `rna_msa.a3m`. `mol prep` and `mol cpred` write it to `<out_dir>/<job>/rna_msa/<entity index>/rna_msa.a3m`, where the entity index is the 0-based position in `sequences`, and fill it in as the chain's `unpairedMsaPath`; it is used only with `--use_rna_msa true`.
 
 ### Prerequisites
 

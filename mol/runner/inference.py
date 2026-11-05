@@ -92,7 +92,7 @@ class InferenceRunner(object):
         logging.info(f"Inference device: {self.device} (requested {requested!r})")
 
         if DIST_WRAPPER.world_size > 1:
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend="nccl" if self.use_cuda else "gloo")
 
         use_fastlayernorm = os.getenv("LAYERNORM_TYPE", "fast_layernorm")
         if use_fastlayernorm == "fast_layernorm":
@@ -171,6 +171,10 @@ class InferenceRunner(object):
             need_atom_confidence=need_atom_confidence,
             sorted_by_ranking_score=sorted_by_ranking_score,
         )
+
+    def build_dataloader(self, configs: Any):
+        """Build native inference samples; model variants may add features."""
+        return get_inference_dataloader(configs=configs)
 
     # Adapted from MolTrainer.evaluate in mol/runner/train.py
     @torch.no_grad()
@@ -586,7 +590,7 @@ def infer_predict(runner: InferenceRunner, configs: Any) -> None:
     # An earlier call on the same runner removes the directory when it is empty.
     os.makedirs(runner.error_dir, exist_ok=True)
     try:
-        dataloader = get_inference_dataloader(configs=configs)
+        dataloader = runner.build_dataloader(configs=configs)
     except Exception as e:
         error_message = (
             f"Dataloader initialization failed: {e}\n{traceback.format_exc()}"

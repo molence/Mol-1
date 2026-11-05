@@ -19,6 +19,7 @@
 # Upstream file: runner/batch_inference.py
 # Changes: mol doctor, --device and local checkpoint paths; MSA search via ColabFold only; non-zero exit when an input fails.
 
+from copy import deepcopy
 import difflib
 import json
 import logging
@@ -298,6 +299,9 @@ def get_default_runner(
     need_atom_confidence: bool = False,
     load_checkpoint_path: Optional[str] = None,
     memory_settings: Optional[Mapping[str, Any]] = None,
+    constraint_config: Optional[str] = None,
+    provided_options: Optional[set] = None,
+    dump_dir: Optional[str] = None,
 ) -> InferenceRunner:
     """
     Get a default InferenceRunner with the specified configurations.
@@ -324,38 +328,59 @@ def get_default_runner(
     Returns:
         InferenceRunner: An instance of InferenceRunner.
     """
-    configs = {**configs_base, **{"data": data_configs}, **inference_configs, "model_name": model_name}
-    configs = parse_configs(
-        configs=configs,
-        fill_required_with_null=True,
-    )
-    if seeds is not None:
-        configs.seeds = seeds
-    model_name = configs.model_name
-    if model_name not in model_configs:
-        raise ValueError(f"Unsupported model {model_name!r}; available models: {', '.join(model_configs)}")
-    model_specfics_configs = ConfigDict(model_configs[model_name])
-    # update model specific configs
-    configs.update(model_specfics_configs)
-    # the user input configs has the highest priority
-    configs.model.N_cycle = n_cycle
-    configs.sample_diffusion.N_sample = n_sample
-    configs.sample_diffusion.N_step = n_step
-    configs.dtype = dtype
-    configs.device = device
-    if load_checkpoint_path is not None:
-        configs.load_checkpoint_path = load_checkpoint_path
-    configs.use_msa = use_msa
-    configs.triangle_multiplicative = trimul_kernel
-    configs.triangle_attention = triatt_kernel
-    configs.enable_efficient_fusion = enable_fusion
-    configs.enable_tf32 = enable_tf32
-    configs.use_template = use_template
-    configs.use_rna_msa = use_rna_msa
-    configs.use_seeds_in_json = use_seeds_in_json
-    configs.need_atom_confidence = need_atom_confidence
+    runner_class = InferenceRunner
+    raw = {}
+    if model_name == "mol-1-constraint":
+        from mol.constraint.config import load_inference_config
+        from mol.constraint.inference import ConstraintInferenceRunner
+        from mol.constraint.config import load_config_overrides
+
+        configs = load_inference_config(constraint_config, [])
+        raw = load_config_overrides(constraint_config)
+        runner_class = ConstraintInferenceRunner
+    else:
+        configs = {**configs_base, **{"data": data_configs}, **inference_configs, "model_name": model_name}
+        configs = parse_configs(
+            configs=configs,
+            fill_required_with_null=True,
+        )
+        model_name = configs.model_name
+        if model_name not in model_configs:
+            raise ValueError(f"Unsupported model {model_name!r}; available models: {', '.join(model_configs)}")
+        model_specfics_configs = ConfigDict(model_configs[model_name])
+        # update model specific configs
+        configs.update(model_specfics_configs)
+    def configured(path):
+        node = raw
+        for key in path.split('.'):
+            if not isinstance(node, Mapping) or key not in node:
+                return False
+            node = node[key]
+        return True
+
+    # One application path for pred and cpred. Click supplies the explicit option
+    # names; direct Python callers treat their supplied request as authoritative.
+    values = {
+        'seeds': ('seeds', seeds), 'cycle': ('model.N_cycle', n_cycle),
+        'step': ('sample_diffusion.N_step', n_step),
+        'sample': ('sample_diffusion.N_sample', n_sample),
+        'dtype': ('dtype', dtype), 'device': ('device', device),
+        'use_msa': ('use_msa', use_msa), 'use_template': ('use_template', use_template),
+        'use_rna_msa': ('use_rna_msa', use_rna_msa),
+        'use_seeds_in_json': ('use_seeds_in_json', use_seeds_in_json),
+        'need_atom_confidence': ('need_atom_confidence', need_atom_confidence),
+        'trimul_kernel': ('triangle_multiplicative', trimul_kernel),
+        'triatt_kernel': ('triangle_attention', triatt_kernel),
+        'enable_fusion': ('enable_efficient_fusion', enable_fusion),
+        'enable_tf32': ('enable_tf32', enable_tf32),
+        'load_checkpoint_path': ('load_checkpoint_path', load_checkpoint_path),
+        'out_dir': ('dump_dir', dump_dir),
+    }
+    for option, (key, value) in values.items():
+        if value is not None and (provided_options is None or option in provided_options or not configured(key)):
+            apply_memory_settings(configs, {key: value})
     apply_memory_settings(configs, memory_settings or {})
-    if use_template:
+    if configs.use_template:
         # Fail before the model loads, not on the first template hit.
         find_kalign()
 
@@ -371,7 +396,7 @@ def get_default_runner(
         f"enable_tf32: {configs.enable_tf32}"
     )
     download_inference_cache(configs)
-    return InferenceRunner(configs)
+    return runner_class(configs)
 
 
 def inference_jsons(
@@ -405,6 +430,8 @@ def inference_jsons(
     nhmmer_n_cpu: Optional[int] = None,
     load_checkpoint_path: Optional[str] = None,
     memory_settings: Optional[Mapping[str, Any]] = None,
+    constraint_config: Optional[str] = None,
+    provided_options: Optional[set] = None,
 ) -> None:
     """
     Run inference on a single JSON file or a directory of JSON files.
@@ -455,8 +482,10 @@ def inference_jsons(
     logger.info(f"Will infer with {len(infer_jsons)} jsons")
 
     failed_jsons = []
-    inference_configs["dump_dir"] = out_dir
     runner = get_default_runner(
+        constraint_config=constraint_config,
+        provided_options=provided_options,
+        dump_dir=out_dir,
         seeds=seeds,
         n_cycle=n_cycle,
         n_step=n_step,
@@ -477,8 +506,18 @@ def inference_jsons(
         memory_settings=memory_settings,
     )
     configs = runner.configs
+    out_dir = configs.get('dump_dir', out_dir)
+    use_msa = configs.get('use_msa', use_msa)
+    use_template = configs.get('use_template', use_template)
+    use_rna_msa = configs.get('use_rna_msa', use_rna_msa)
     for infer_json in tqdm.tqdm(infer_jsons):
         try:
+            if model_name == "mol-1-constraint":
+                from mol.constraint.inputs import read_json
+                # Search may rewrite JSON with a permissive parser, hiding
+                # duplicate keys before the constraint dataset can reject them.
+                read_json(infer_json)
+                
             configs["input_json_path"] = preprocess_input(
                 infer_json,
                 out_dir=out_dir,
@@ -606,7 +645,7 @@ def mol_cli() -> None:
     "--use_default_params",
     type=bool,
     default=False,
-    help="Use recommended default parameters for the selected model.",
+    help="Force recommended cycle/step defaults, overriding explicit values and config budgets.",
 )
 @click.option(
     "--trimul_kernel",
@@ -759,6 +798,7 @@ def predict(
     rna_central_database_path: Optional[str] = None,
     nhmmer_n_cpu: Optional[int] = None,
     load_checkpoint_path: Optional[str] = None,
+    constraint_config: Optional[str] = None,
     **memory_args: Any,
 ) -> None:
     """
@@ -799,9 +839,23 @@ def predict(
     memory_settings = memory_settings_from_options(memory_args)
     init_logging()
     logger.info(f"Run infer with input={input}, out_dir={out_dir}, sample={sample}")
+    context = click.get_current_context()
+    provided = {name for name in context.params
+                if context.get_parameter_source(name) != click.core.ParameterSource.DEFAULT}
     if use_default_params:
-        cycle = configs_base["model"]["N_cycle"]
-        step = configs_base["sample_diffusion"]["N_step"]
+        recommended = {
+            'cycle': configs_base["model"]["N_cycle"],
+            'step': configs_base["sample_diffusion"]["N_step"],
+        }
+        overridden = [f"--{name} {value} -> {recommended[name]}"
+                      for name, value in (('cycle', cycle), ('step', step))
+                      if name in provided and value != recommended[name]]
+        if overridden:
+            logger.warning("Arguments overridden because --use_default_params=true: %s",
+                           ", ".join(overridden))
+        cycle, step = recommended['cycle'], recommended['step']
+        # The flag overrides both explicit arguments and constraint JSON budgets.
+        provided.update({'cycle', 'step'})
     logger.info(
         f"Using default params for model {model_name}: "
         f"cycle={cycle}, step={step}, use_msa={use_msa}"
@@ -846,6 +900,9 @@ def predict(
             "using seeds from modelSeeds defined in the JSON."
         )
         logger.info("=" * 50)
+    variant_options = dict(provided_options=provided)
+    if model_name == "mol-1-constraint":
+        variant_options["constraint_config"] = constraint_config
     inference_jsons(
         input,
         out_dir,
@@ -877,6 +934,7 @@ def predict(
         rna_central_database_path=rna_central_database_path,
         nhmmer_n_cpu=nhmmer_n_cpu,
         memory_settings=memory_settings,
+        **variant_options,
     )
 
 
@@ -1233,8 +1291,30 @@ def doctor() -> None:
     click.echo(format_doctor_report())
 
 
+def constraint_predict_command():
+    """Reuse pred's option definitions and callback with constraint defaults."""
+    from mol.constraint.config import MODEL_NAME
+
+    params = deepcopy(predict.params)
+    for param in params:
+        if param.name == 'model_name':
+            param.default = MODEL_NAME
+            param.type = click.Choice([MODEL_NAME])
+        elif param.name == 'load_checkpoint_path':
+            param.help = ('Constraint checkpoint. Defaults to '
+                          '$MOL_ROOT_DIR/checkpoint/mol-1-constraint.pt, downloaded there if missing.')
+    params += [
+        click.Option(['--config', 'constraint_config'], type=click.Path(exists=True, dir_okay=False),
+                     default=None, help='Optional legacy JSON overrides; defaults are in mol.constraint.config.'),
+    ]
+    return click.Command('cpred', callback=predict.callback, params=params,
+                         context_settings=CONTEXT_SETTINGS,
+                         help='Run Mol-1 constraint predictions with the same runtime options as mol pred.')
+
+
 mol_cli.add_command(doctor, name="doctor")
 mol_cli.add_command(predict, name="pred")
+mol_cli.add_command(constraint_predict_command(), name="cpred")
 mol_cli.add_command(tojson, name="json")
 mol_cli.add_command(msa, name="msa")
 mol_cli.add_command(inputprep, name="prep")

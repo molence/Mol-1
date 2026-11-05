@@ -168,8 +168,8 @@ mol pred -i examples/example.json -o ./output/finetuned \
   --load_checkpoint_path output/mol_finetune_<timestamp>/checkpoints/5_ema_0.999.pt
 ```
 
-`INPUT_JSON_PATH=examples/example.json USE_TEMPLATE=false CHECKPOINT_PATH=... bash inference_demo.sh`
-does the same through `mol/runner/inference.py`.
+Use `mol pred` for base fine-tuned weights. `inference_demo.sh` runs constraint
+inference and requires matching constraint weights; it cannot load a base checkpoint.
 
 Whether fine-tuning on a given dataset improves the model depends on the data:
 compare predictions on held-out structures from the fine-tuned and the base

@@ -40,6 +40,7 @@ RELEASE_URL = "https://mol-1-release.oss-cn-shanghai.aliyuncs.com"
 RELATIVE_PATH: Mapping[str, str] = {
     # Released weights, one entry per registered model configuration.
     "checkpoint_mol-1-base": "checkpoint/mol-1-base.pt",
+    "checkpoint_mol-1-constraint": "checkpoint/mol-1-constraint.pt",
     # Always needed: chemical component definitions and PDB bookkeeping.
     "ccd_components_file": "common/components.cif",
     "ccd_components_rdkit_mol_file": "common/components.cif.rdkit_mol.pkl",

@@ -1,3 +1,5 @@
+*The following applies to evaluations of the Mol-1 base model.*
+
 # Inference memory controls
 
 ## Sizing a GPU

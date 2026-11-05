@@ -1,3 +1,5 @@
+*Remark: The performance measurements below apply to the Mol-1 base model and have not been repeated for Mol-1-constraint.*
+
 # Kernels
 
 Three operations have more than one implementation: layer normalization, the

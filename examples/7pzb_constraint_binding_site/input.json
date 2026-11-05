@@ -1,0 +1,73 @@
+[
+  {
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "MAEVIRSSAFWRSFPIFEEFDSETLCELSGIASYRKWSAGTVIFQRGDQGDYMIVVVSGRIKLSLFTPQGRELMLRQHEAGALFGEMALLDGQPRSADATAVTAAEGYVIGKKDFLALITQRPKTAEAVIRFLCAQLRDTTDRLETIALYDLNARVARFFLATLRQIHGSEMPQSANLRLTLSQTDIASILGASRPKVNRAILSLEESGAIKRADGIICCNVGRLLSIADPEEDLEHHHHHHHH",
+          "count": 2,
+          "id": [
+            "A",
+            "B"
+          ],
+          "pairedMsaPath": "./examples/7pzb/msa/1/pairing.a3m",
+          "unpairedMsaPath": "./examples/7pzb/msa/1/non_pairing.a3m"
+        }
+      },
+      {
+        "dnaSequence": {
+          "sequence": "CTAGGTAACATTACTCGCG",
+          "count": 2,
+          "id": [
+            "C",
+            "D"
+          ]
+        }
+      },
+      {
+        "dnaSequence": {
+          "sequence": "GCGAGTAATGTTAC",
+          "count": 2,
+          "id": [
+            "E",
+            "F"
+          ]
+        }
+      },
+      {
+        "ligand": {
+          "ligand": "CCD_PCG",
+          "count": 2,
+          "id": [
+            "G",
+            "H"
+          ]
+        }
+      }
+    ],
+    "name": "7pzb_constraint_binding_site",
+    "constraints": {
+      "site": {
+        "source_chains": [
+          "A"
+        ],
+        "partner_chains": [
+          "G"
+        ],
+        "residue_ids": [
+          [
+            "A",
+            86
+          ],
+          [
+            "A",
+            95
+          ],
+          [
+            "A",
+            140
+          ]
+        ]
+      }
+    }
+  }
+]

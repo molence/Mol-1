@@ -28,6 +28,8 @@ Each dictionary contains the following keys:
 
 Details of `sequences` and `covalent_bonds` are provided below.
 
+For constraint conditioning input, see [constraint semantics](constraint_semantics.md).
+
 ## sequences
 There are 5 kinds of supported sequences:
 *   `proteinChain` – used for proteins
@@ -78,7 +80,7 @@ There are 5 kinds of supported sequences:
     0-based positions in the query sequence and in that chain's sequence, paired
     one to one. No alignment is run for these templates.
 
-> 💡 **Note**: `pairedMsaPath`, `unpairedMsaPath`, and `templatesPath` are all **Optional**. Without MSA paths, `mol pred` searches for the MSAs on the ColabFold service, since `--use_msa` is on by default; with `--use_msa false` it predicts without MSAs, usually with a large loss of accuracy. A path that does not exist counts as missing: `mol pred` warns and searches instead, so run the bundled examples, whose paths are relative, from the repository root. Without `templatesPath`, `--use_template true` searches for templates; templates are off by default.
+> 💡 **Note**: `pairedMsaPath`, `unpairedMsaPath`, and `templatesPath` are all **Optional**. Without MSA paths, `mol cpred` searches for the MSAs on the ColabFold service, since `--use_msa` is on by default; with `--use_msa false` it predicts without MSAs, usually with a large loss of accuracy. A path that does not exist counts as missing: `mol cpred` warns and searches instead, so run the bundled examples, whose paths are relative, from the repository root. Without `templatesPath`, `--use_template true` searches for templates; templates are off by default.
 
 > ⚠️ **Note**: A dictionary-valued `msa` field (e.g., `"msa": {"precomputed_msa_dir": "...", "pairing_db": "uniref100"}`) is also accepted, but it is deprecated and may be dropped. Use `pairedMsaPath` and `unpairedMsaPath`.
 
@@ -241,7 +243,7 @@ The position value starts at 1 and can vary based on the type of entity:
 
 ## Preparing MSAs and templates
 
-`mol pred` searches for whatever an input lacks, so these commands are only
+`mol cpred` searches for whatever an input lacks, so these commands are only
 needed to run the searches ahead of time. The input file is left unchanged: the
 results go under `-o`, and a copy of the JSON with the new paths filled in is
 written next to the input, as `<name>-update-msa.json` after the MSA search and

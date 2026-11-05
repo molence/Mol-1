@@ -114,8 +114,8 @@ Two lines to read first:
 
 Set `MOL_ROOT_DIR` to a data root (it defaults to the home directory) and fetch
 the reference data into it once with `bash scripts/database/download_mol_data.sh`.
-The weights go to `$MOL_ROOT_DIR/checkpoint/mol-1-base.pt`, where the first
-prediction downloads them if they are missing, or are passed with
+`mol cpred` uses `$MOL_ROOT_DIR/checkpoint/mol-1-constraint.pt`, downloading
+the weights there on first prediction if missing. Custom weights are passed with
 `--load_checkpoint_path`. [data_sources.md](data_sources.md) lists every archive
 and file. The scripts under `scripts/` are not included in the wheel; run them
 from a checkout.

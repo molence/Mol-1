@@ -1,6 +1,6 @@
-# Mol-1
+# Mol-1-constraint
 
-<img src="assets/images/ribbon-mint-portrait.png" style="width: 100%; height: auto;" alt="Mol-1 overview">
+<img src="assets/images/ribbon-mint-hotspots.png" style="width: 100%; height: auto;" alt="Mol-1 overview">
 
 
 
@@ -34,10 +34,11 @@
 
 ## Install
 
-You can install `Mol-1` with the following commands:
+You can install `Mol-1-constraint` with the following commands:
 
 ```bash
-git clone https://github.com/molence/Mol-1 && cd Mol-1
+git clone --branch constraint https://github.com/molence/Mol-1.git
+cd Mol-1
 
 pip install -e ".[cuda]"      # NVIDIA GPU
 # or
@@ -56,29 +57,51 @@ export MOL_ROOT_DIR="./data"    # model weight and reference data will be put he
 bash scripts/database/download_mol_data.sh   # run once: reference data, ~0.3 GB
 
 mkdir -p ${MOL_ROOT_DIR}/checkpoint
-# download model checkpoint, ~2.2 GB
-wget https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-base.pt \
-  -O ${MOL_ROOT_DIR}/checkpoint/mol-1-base.pt
+# download Mol-1-constraint weights (also downloaded automatically if missing)
+wget https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-constraint.pt \
+  -O "${MOL_ROOT_DIR}/checkpoint/mol-1-constraint.pt"
 
-# predict example: a homodimer with two ligands (644 tokens)
-mol pred -i examples/examples_with_template/example_9fm7.json -o ./output
+# Optional base weights for Training from base below:
+# wget https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-base.pt \
+#   -O "${MOL_ROOT_DIR}/checkpoint/mol-1-base.pt"
+
+# predict a protein–DNA–ligand complex (600 tokens) 
+# with three protein residues as binding site 
+mol cpred -i examples/7pzb_constraint_binding_site/input.json -o ./output
 ```
 
-The example needs about 14 GB of GPU memory; on a 95 GiB NVIDIA Blackwell GPU it takes about two minutes, half of it loading the model, plus a few minutes the first time for the CUDA build above. If it goes well, results will land in `output/9fm7/seed_101/predictions/` as CIF structures with a confidence JSON per sample. By default, Mol-1 predicts without templates (`--use_template false`); to use them, install the extra dependencies described in [Template search and align](#template-search-and-align).
+Results land in `output/7pzb_constraint_binding_site/seed_101/predictions/` as 5 CIF structures and their confidence JSON files. Templates are off by default;
+see [Template search and align](#template-search-and-align) to enable them.
 
 
-## Predict with Mol-1
-The easiest way to run Mol-1 prediction is:
+## Predict with Mol-1-constraint
+The easiest way to run Mol-1-constraint prediction is:
 
 ```bash
-mol pred -i /path/to/input/json -o /path/to/output/dir
+mol cpred -i /path/to/input/json -o /path/to/output/dir
 ```
 
-**Input format**. `Mol-1`'s input is a list of "jobs" described by JSON, where each job's `sequences` holds `proteinChain`, `dnaSequence`, `rnaSequence`, `ligand` or `ion` entries, with optional
+**Input format**. `Mol-1-constraint`'s input is a list of "jobs" described by JSON, where each job's `sequences` holds `proteinChain`, `dnaSequence`, `rnaSequence`, `ligand` or `ion` entries, with optional
 `covalent_bonds` and residue modifications. Template hits are accepted as
 `.a3m`, `.hhr` or JSON. See the details in [input JSON format](docs/infer_json_format.md) and
 [`examples/`](examples/), which includes a nanobody case driven by JSON
 templates.
+
+**Constraints**. Add SITE, CONTACT or EXCLUSION to the input JSON as described in
+[constraint semantics](docs/constraint_semantics.md). The released model supports
+all three; each input may use any combination or none. Conditioning guides the
+prediction without guaranteeing satisfaction or filtering candidates.
+
+**Optional agent skill (beta).** The
+[evidence-to-constraints skill](docs/mol1-evidence-to-constraints/SKILL.md) is a
+companion tool for converting experimental observations (e.g., from literature) into
+proposed Mol-1 constraint inputs, with source evidence, residue/token mapping, and technical
+validation. It is **not required** to use the model. Users are responsible for verifying
+the authenticity of the evidence and assessing its scientific interpretation.
+
+Inference defaults to 20 recycles and 200 diffusion steps. Override them with
+`--cycle` and `--step`. Note that setting `--use_default_params true` forces 20/200 even when other
+budgets are supplied. Other explicit CLI options override `--config` JSON values.
 
 **Prediction outputs**. Results are organized in `output/<job_name>/seed_<seed>/predictions/` as CIF structures with a confidence JSON per sample. Within each seed, samples are numbered by `ranking_score`, highest first, so `sample_0` is that seed's top-ranked structure.
 
@@ -88,7 +111,8 @@ field, including two that trip people up — `plddt` is scaled 0–100 while
 residue number. The per-token and per-atom data, the PAE matrix among them, go
 to a separate `full_data` JSON written only with `--need_atom_confidence true`.
 
-**MSA and template**. For an input of your own, `mol pred` searches for what the JSON does not carry. Protein MSAs come from the public ColabFold MMseqs2 service, so
+**MSA and template**. For an input of your own, `mol cpred` searches for what the JSON does not carry. 
+Protein MSAs come from the public ColabFold MMseqs2 service, so
 `--use_msa`, on by default, needs network access. With `--use_template true`,
 templates are searched with HMMER against the `search_database/` archive,
 starting from the chain's MSA. A `pairedMsaPath`, `unpairedMsaPath` or
@@ -101,9 +125,11 @@ databases (Rfam, RNAcentral and an NCBI `nt` RNA subset, tens of gigabytes) that
 the release archives do not include; [docs/data_sources.md](docs/data_sources.md)
 names them.
 
-**Script example**. [`inference_demo.sh`](inference_demo.sh) runs the same
-*9fm7* example through `mol/runner/inference.py`, which accepts every config
-setting as an option; the comment at the top of the script explains its use.
+**Script example**. `bash inference_demo.sh` runs the prepared
+[7PZB binding-site example](examples/7pzb_constraint_binding_site/input.json)
+through `mol/constraint/inference.py`, reusing its MSAs with templates disabled.
+Set `CHECKPOINT_PATH` to use custom weights; additional native runner options
+can be appended to the script command.
 
 ### Template search and align
 The example `examples/examples_with_template/example_9fm7.json` carries precomputed MSAs and template hits, but using templates still needs `kalign`, which aligns every hit to the query; the hit structures are downloaded from PDBe on first use. Template search for your own inputs also needs HMMER. Install both:
@@ -115,7 +141,7 @@ sudo apt-get install hmmer kalign
 conda install -c conda-forge -c bioconda --override-channels hmmer kalign3=3.3.5
 
 # predict example with template
-mol pred -i examples/examples_with_template/example_9fm7.json -o ./output \
+mol cpred -i examples/examples_with_template/example_9fm7.json -o ./output \
   --use_template true
 ```
 
@@ -126,7 +152,8 @@ mol pred -i examples/examples_with_template/example_9fm7.json -o ./output \
 
 | Command | What it does |
 | ------- | ------------ |
-| `mol pred` | Run inference |
+| `mol cpred` | Run Mol-1-constraint inference |
+| `mol pred` | Run base-model inference with base weights |
 | `mol json` | Convert PDB/CIF structures to Mol-1 JSON |
 | `mol msa` | Protein MSA search |
 | `mol prep` | MSA and template search; RNA MSA search with `--use_rna_msa true` |
@@ -150,7 +177,15 @@ precomputed MSAs and template hits (9.8 GB, 46 GB extracted).
 [docs/data_sources.md](docs/data_sources.md) lists every archive with its
 contents and download link.
 
-Pass the weights to `mol pred` with `--load_checkpoint_path`, or put them at `$MOL_ROOT_DIR/checkpoint/mol-1-base.pt`; when neither is there, the first prediction downloads them to that path. An explicit path is always used as given. Loading is strict: a checkpoint whose shapes do not match the architecture is rejected rather than partially loaded. [`scripts/check_mol_checkpoint.py`](scripts/check_mol_checkpoint.py) verifies one on its own and reports how many state entries it loaded.
+`mol cpred` uses `$MOL_ROOT_DIR/checkpoint/mol-1-constraint.pt`, downloading the
+[released Mol-1-constraint weights](https://mol-1-release.oss-cn-shanghai.aliyuncs.com/checkpoint/mol-1-constraint.pt)
+there if missing. Pass `--load_checkpoint_path /path/to/mol-1-constraint.pt` to
+use custom weights; an explicit path must exist and is never replaced by a download.
+Regular and EMA exports both load the supplied `model` tensors directly.
+Loading is strict: model branches, tensor shapes and checkpoint metadata must match.
+Base weights for training are available from the commented download command in
+[Quick-start](#quick-start).
+
 
 ## Fine-tune Mol-1
 
@@ -170,18 +205,16 @@ python3 scripts/prepare_finetune_msa.py -b finetune_data/bioassembly \
   -o finetune_data/msa
 ```
 
-Launch the fine-tuning as follows:
+The fine-tuning script reads `FINETUNE_DATA_DIR` (default `./finetune_data`).
+
+Fine-tune base weights:
 ```bash
 CHECKPOINT_PATH="${MOL_ROOT_DIR}/checkpoint/mol-1-base.pt" bash finetune_demo.sh \
-  --max_steps 6 \
-  --checkpoint_interval 3
+  --max_steps 6 --checkpoint_interval 3
 ```
 
-[`finetune_demo.sh`](finetune_demo.sh) starts from a checkpoint: weights load
-strictly, the optimizer and scheduler start fresh, and EMA initializes from the
-loaded weights. That is deliberately distinct from resuming a run together with
-its optimizer state. [docs/finetune.md](docs/finetune.md) walks through each
-step, the recipe's settings and predicting with the result.
+Dataset preparation and base fine-tuning options are described in
+[docs/finetune.md](docs/finetune.md).
 
 
 ## Environment diagnosis
@@ -192,51 +225,22 @@ loads no model; run it before filing a bug.
 [docs/installation.md](docs/installation.md#verify) shows a report and what to
 look for in it.
 
-## Memory
-
-Peak device memory grows close to quadratically with token count and depends
-on the GPU. [docs/inference_memory.md](docs/inference_memory.md) has measured
-points, how to fit a curve for your own card from the token count and peak
-that every prediction logs, and every chunking control. When a system does not
-fit, the error names the settings to turn. When it fits with room to spare,
-`--infer_setting.sample_diffusion_chunk_size 5` denoises the five samples
-together instead of one at a time, which is faster.
-
-**Large inputs.** The defaults fit inputs of up to about 1,500 tokens on a
-95 GiB GPU. Larger ones, such as the biggest systems in FoldBench, need the
-[large-input settings](docs/inference_memory.md#large-inputs): smaller chunks,
-the PyTorch triangle multiplication and expandable allocator segments. To
-predict all of FoldBench, run its inputs above 1,500 tokens with them:
-
-```bash
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-mol pred -i input.json -o ./output --trimul_kernel torch \
-  --infer_setting.chunk_size 256 --model.msa_module.msa_chunk_size 512 \
-  --infer_setting.msa_pair_transition_chunk_size 256 \
-  --infer_setting.trunk_pairmixer_transition_chunk_size 32 \
-  --infer_setting.trunk_pairformer_transition_chunk_size 32 \
-  --infer_setting.confidence_pair_transition_chunk_size 32 \
-  --infer_setting.diffusion_conditioning_row_chunk_size 384
-```
-
-On a 95 GiB GPU this completes the two largest FoldBench inputs, of 2,456 and
-2,532 tokens, in about 25 minutes per seed.
 
 ## Benchmarks
 
-**Antibody–antigen structure prediction.** (a)–(d) Top-ranked DockQ success rates with a five-seed budget. (e) Mean DockQ versus seed count K; shading denotes the 5th–95th percentiles over seed subsets. (f) Success rates across all 201,376 five-seed subsets of 32 seeds on FoldBench-AB.
+**Comparison with constraint models.** Mol-1-constraint, Chai-1, Boltz-1,
+Boltz-2 and Protenix-v0.5 receive reference-derived binding-site (interface residue) constraint as input.
+The left panel covers 160 FoldBench antibody–antigen interfaces (epitope, success DockQ >0.23
+and >0.80); the right covers 511 protein–ligand interfaces (pocket, standard success requires iLDDT ≥0.8 and ligand RMSD ≤2 Å; strict success requires ≥0.9 and ≤1.5 Å in the same candidate). Results select the top-1 candidate by chain-pair ipTM from 5 seeds with 5 samples per seed. This comparison measures how models use it.
 
-<img src="assets/images/abag-overview.png" style="width: 90%; height: auto;" alt="Mol-1 overview">
+<img src="assets/images/constraint-benchmark-overview.png" style="width: 95%; height: auto;" alt="Constraint model comparisons on antibody–antigen and protein–ligand interfaces">
 
-**Protein–ligand and molecular glue prediction.** (a) Runs N’ Poses success rates bySuCOS-pocket similarity to training complexes; parentheses give system counts, and open diamonds denote pocket-conditioned Mol-1-constraint. (b) MGBench success rates by homology group. Success in a requires ligand RMSD < 2 Å and lDDT-PLI > 0.8, while success in b requires ligand RMSD < 2 Å, lDDT-PLI > 0.8 and protein-protein interface DockQ > 0.23. (c) Individual PoseBusters check pass rates over 64,800 predictions per method.
+**Robustness to incomplete and incorrect site inputs.** All five constraint models share 150 antibody–antigen interfaces, ranked by chain-pair
+ipTM. From left to right: increasing correct-site coverage; adding incorrect
+residues to the full reference site; and adding incorrect residues to a 60%
+reference site. Curves show reference binding-site contact recovery (CSR); the dashed line is Mol-1 performance for comparison.
 
-<img src="assets/images/pl_overview_posebusters_300dpi.png" style="width: 90%; height: auto;" alt="Mol-1 overview">
-
-
-**Protein–peptide complex prediction on MolBench-Peptide-26, a 2026 Q1–Q3 bench-
-mark comprising 172 interface clusters from 150 PDB entries.** (a)–(c) Success rates at DockQ > 0.23, > 0.49, and > 0.80, respectively. Mol-1 and Mol-1-constraint use 10 recycling cycles and are shown in solid and hatched blue; baselines are gray. Y-axes are truncated and use different ranges across panels.
-
-<img src="assets/images/pp_overview.png" style="width: 90%; height: auto;" alt="Mol-1 overview">
+<img src="assets/images/constraint-robustness-overview.png" style="width: 95%; height: auto;" alt="Reference-site CSR under increasing correct coverage and two incorrect-site perturbations">
 
 
 ## Documentation
@@ -245,6 +249,8 @@ mark comprising 172 interface clusters from 150 PDB entries.** (a)–(c) Success
 - [Fine-tuning on your own structures](docs/finetune.md)
 - [Preparing training data](docs/prepare_training_data.md)
 - [Input JSON format](docs/infer_json_format.md)
+- [Constraint semantics and input examples](docs/constraint_semantics.md)
+- [Evidence-to-constraints skill](docs/mol1-evidence-to-constraints/SKILL.md)
 - [Output format](docs/output_format.md)
 - [Kernel options](docs/kernels.md)
 - [Inference memory controls](docs/inference_memory.md)

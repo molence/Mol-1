@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
@@ -90,10 +90,12 @@ class PredExitStatusTest(unittest.TestCase):
             runner = SimpleNamespace(error_dir=os.path.join(d, "ERR"))
             configs = SimpleNamespace(input_json_path=input_json, use_seeds_in_json=False,
                                       seeds=[101])
-            with patch.object(inference, "get_inference_dataloader",
-                              side_effect=ValueError("unreadable input")):
+            runner.build_dataloader = Mock(side_effect=ValueError("unreadable input"))
+            with patch.object(inference, "get_inference_dataloader") as base_loader:
                 with self.assertRaisesRegex(RuntimeError, "Dataloader initialization failed"):
                     inference.infer_predict(runner, configs)
+            runner.build_dataloader.assert_called_once_with(configs=configs)
+            base_loader.assert_not_called()
             self.assertIn("unreadable input",
                           Path(runner.error_dir, "error.txt").read_text())
 
@@ -109,10 +111,12 @@ class PredExitStatusTest(unittest.TestCase):
             configs = SimpleNamespace(input_json_path=input_json, use_seeds_in_json=False,
                                       seeds=[101], deterministic=False)
             batch = [({"sample_name": "x"}, None, "kalign exited with status 1")]
-            with patch.object(inference, "get_inference_dataloader",
-                              return_value=Loader([batch])):
+            runner.build_dataloader = Mock(return_value=Loader([batch]))
+            with patch.object(inference, "get_inference_dataloader") as base_loader:
                 with self.assertRaisesRegex(RuntimeError, r"1 of 1 prediction\(s\) failed: x"):
                     inference.infer_predict(runner, configs)
+            runner.build_dataloader.assert_called_once_with(configs=configs)
+            base_loader.assert_not_called()
             self.assertIn("kalign exited with status 1",
                           Path(runner.error_dir, "x.txt").read_text())
 
