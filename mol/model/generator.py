@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional
 
 import torch
 
+from mol.model.cuda_graph import GraphedDenoiseStep, diffusion_graph_enabled
 from mol.model.modules.transformer import ProjectedPairBiases
 from mol.model.utils import centre_random_augmentation
 from mol.utils.logger import get_logger
@@ -193,6 +194,24 @@ def sample_diffusion(
         if projected_pair_biases is not None
         else denoise_net
     )
+    denoise_kwargs = dict(
+        input_feature_dict=input_feature_dict,
+        s_inputs=s_inputs,
+        s_trunk=s_trunk,
+        z_trunk=z_trunk,
+        pair_z=pair_z,
+        p_lm=p_lm,
+        c_l=c_l,
+        chunk_size=attn_chunk_size,
+        inplace_safe=inplace_safe,
+        enable_efficient_fusion=enable_efficient_fusion,
+    )
+    graphed_step = (
+        GraphedDenoiseStep(request_denoise_net, **denoise_kwargs)
+        if diffusion_graph_enabled(s_inputs)
+        else None
+    )
+
     def _chunk_sample_diffusion(chunk_n_sample, inplace_safe):
         # init noise
         # [..., N_sample, N_atom, 3]
@@ -228,20 +247,12 @@ def sample_diffusion(
                 .to(dtype)
             )
 
-            x_denoised = request_denoise_net(
-                x_noisy=x_noisy,
-                t_hat_noise_level=t_hat,
-                input_feature_dict=input_feature_dict,
-                s_inputs=s_inputs,
-                s_trunk=s_trunk,
-                z_trunk=z_trunk,
-                pair_z=pair_z,
-                p_lm=p_lm,
-                c_l=c_l,
-                chunk_size=attn_chunk_size,
-                inplace_safe=inplace_safe,
-                enable_efficient_fusion=enable_efficient_fusion,
-            )
+            if graphed_step is not None:
+                x_denoised = graphed_step(x_noisy, t_hat)
+            else:
+                x_denoised = request_denoise_net(
+                    x_noisy=x_noisy, t_hat_noise_level=t_hat, **denoise_kwargs
+                )
 
             delta = (x_noisy - x_denoised) / t_hat[
                 ..., None, None
