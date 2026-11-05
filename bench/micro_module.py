@@ -39,8 +39,10 @@ z = torch.randn(N, N, C, device="cuda", dtype=torch.bfloat16)
 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
     t = bench(lambda: call(mod, z))
     print(f"{kind} N={N} C={C}: {t:.3f} ms")
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA], record_shapes=True, with_stack=True) as prof:
         for _ in range(5):
             call(mod, z)
         torch.cuda.synchronize()
 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25, max_name_column_width=90))
+if os.getenv("STACKS"):
+    print(prof.key_averages(group_by_stack_n=6).table(sort_by="self_cuda_time_total", row_limit=12, max_name_column_width=60, max_src_column_width=200))

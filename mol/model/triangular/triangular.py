@@ -25,6 +25,7 @@ from abc import ABC, abstractmethod
 from functools import partial, partialmethod
 from typing import List, Optional
 
+import math
 import os
 
 import torch
@@ -41,6 +42,9 @@ from mol.model.utils import chunk_layer, is_fp16_enabled, permute_final_dims
 # aligned sizes. Padded rows/columns are masked out and sliced off, so the
 # result for the real tokens is unchanged. MOL_TRI_PAD=0 disables it.
 _TRI_PAD_MULTIPLE = int(os.getenv("MOL_TRI_PAD", "8"))
+# Inference fast path for TriangleAttention with cuEquivariance
+# (see TriangleAttention._fused_inference_forward). MOL_FUSED_TRI_ATT=0 disables.
+_FUSED_TRI_ATT = os.getenv("MOL_FUSED_TRI_ATT", "1") != "0"
 
 
 def _tri_pad_amount(x: torch.Tensor) -> int:
@@ -656,6 +660,70 @@ class TriangleAttention(nn.Module):
             self.c_in, self.c_in, self.c_in, self.c_hidden, self.no_heads
         )
 
+    def _fused_inference_ok(
+        self, x: torch.Tensor, triangle_attention: str, chunk_size: Optional[int]
+    ) -> bool:
+        return (
+            _FUSED_TRI_ATT
+            and triangle_attention == "cuequivariance"
+            and x.is_cuda
+            and x.dim() == 3
+            and not torch.is_grad_enabled()
+            and self.mha.gating
+            and (chunk_size is None or chunk_size >= x.shape[-3])
+            and x.shape[-2] > 16
+        )
+
+    def _fused_projection_weight(self, dtype: torch.dtype) -> torch.Tensor:
+        """[Wq; Wk; Wv; Wg; W_bias] in one matrix, rows padded to a multiple of 8.
+
+        Padding keeps every column slice of the projection 16-byte aligned, as
+        the Blackwell attention kernel's TMA layout requires.
+        """
+        weights = [
+            self.mha.linear_q.weight,
+            self.mha.linear_k.weight,
+            self.mha.linear_v.weight,
+            self.mha.linear_g.weight,
+            self.linear.weight,
+        ]
+        key = (dtype, tuple((w.data_ptr(), w._version) for w in weights))
+        cached = getattr(self, "_fused_w_cache", None)
+        if cached is None or cached[0] != key:
+            w = torch.cat(weights, 0)
+            w = F.pad(w, (0, 0, 0, (-w.shape[0]) % 8)).to(dtype)
+            self._fused_w_cache = (key, w)
+        return self._fused_w_cache[1]
+
+    def _fused_inference_forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Inference fast path: one projection GEMM, cuEquivariance attention,
+        fused sigmoid gating. Same math as the mha path."""
+        from mol.model.triangular.fused_gate import sigmoid_gate_transpose
+        from mol.model.triangular.layers import cuequivariance_triangular_attn
+
+        n_i, n_j, _ = x.shape
+        h, d = self.no_heads, self.c_hidden
+        hd = h * d
+        dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
+        with torch.amp.autocast("cuda", enabled=False):
+            proj = F.linear(x.to(dtype), self._fused_projection_weight(dtype))
+            # [I, H, J, D] views; the kernel takes these strides as they are.
+            q, k, v = (
+                proj[..., i * hd : (i + 1) * hd].view(n_i, n_j, h, d).transpose(-2, -3)
+                for i in range(3)
+            )
+            g = proj[..., 3 * hd : 4 * hd]
+            # [1, H, I, J]
+            bias = proj[..., 4 * hd : 4 * hd + h].permute(2, 0, 1).unsqueeze(0)
+            if dtype == torch.float32:
+                bias = bias.contiguous()
+            o = cuequivariance_triangular_attn(
+                q, k, v, bias, (mask != 0)[:, None, None, :], 1.0 / math.sqrt(d)
+            )
+            o = sigmoid_gate_transpose(o, g)
+            w_o = self.mha.linear_o.weight
+            return F.linear(o, w_o.to(dtype))
+
     @torch.jit.ignore
     def _chunk(
         self,
@@ -716,6 +784,14 @@ class TriangleAttention(nn.Module):
 
         # [*, I, J, C_in]
         x = self.layer_norm(x)
+
+        if self._fused_inference_ok(x, triangle_attention, chunk_size):
+            x = self._fused_inference_forward(x, mask)
+            if not self.starting:
+                x = x.transpose(-2, -3)
+            if pad:
+                x = x[..., :n_tok, :n_tok, :]
+            return x
 
         # [*, I, 1, 1, J]
         mask_bias = (self.inf * (mask - 1))[..., :, None, None, :]
