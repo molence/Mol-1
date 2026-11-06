@@ -112,7 +112,11 @@ class TriangleFastPathTest(unittest.TestCase):
         w = lambda *s: (torch.randn(*s, device="cuda") / s[-1] ** 0.5).to(dt)
         niw, nib, now, nob = w(c) + 1, w(c), w(c) + 1, w(c)
         p_in, g_in, p_out, g_out = w(2 * c, c), w(2 * c, c), w(c, c), w(c, c)
-        for direction in ("outgoing", "incoming"):
+        from mol.model.triangular.fast_trimul import interleave_gate_weight
+
+        w_in = torch.cat([g_in, p_in])
+        for direction, w_il in (("outgoing", None), ("incoming", None), ("outgoing", interleave_gate_weight(w_in)),
+                                ("incoming", interleave_gate_weight(w_in))):
             with torch.no_grad():
                 ref = triangle_multiplicative_update(
                     x[None], direction=direction, mask=mask[None], norm_in_weight=niw,
@@ -120,8 +124,8 @@ class TriangleFastPathTest(unittest.TestCase):
                     norm_out_weight=now, norm_out_bias=nob, p_out_weight=p_out,
                     g_out_weight=g_out, eps=1e-5,
                 )[0].float()
-                out = fast(x, direction, mask, niw, nib, torch.cat([g_in, p_in]), now, nob,
-                           p_out, g_out, 1e-5, residual=res).float()
+                out = fast(x, direction, mask, niw, nib, w_in, now, nob,
+                           p_out, g_out, 1e-5, residual=res, in_weight_interleaved=w_il).float()
             keep = mask.bool()
             torch.testing.assert_close(out[keep], (ref + res.float())[keep], atol=5e-2, rtol=2e-2)
 
