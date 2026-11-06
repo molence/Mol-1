@@ -174,6 +174,9 @@ class BiasInitLinear(Linear):
 # MOL_FUSED_TRANSITION=0 disables.
 _FUSED_TRANSITION = os.getenv("MOL_FUSED_TRANSITION", "1") != "0"
 _FUSED_TRANSITION_MIN_ROWS = 262144
+# Within it, the up-projections and SwiGLU in one Triton GEMM (Blackwell and
+# newer, BF16/FP16). MOL_SWIGLU_MATMUL=0 disables.
+_SWIGLU_MATMUL = os.getenv("MOL_SWIGLU_MATMUL", "1") != "0"
 
 
 class Transition(nn.Module):
@@ -208,7 +211,10 @@ class Transition(nn.Module):
             and x.numel() // self.c_in >= 65536
         )
 
-    def _fused_weights(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    def _fused_weights(self, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """([W_a; W_b], the same interleaved for swiglu_matmul, W_out), in dtype."""
+        from mol.model.modules.triton_swiglu import interleave_swiglu_weight
+
         weights = (
             self.linear_no_bias_a.weight,
             self.linear_no_bias_b.weight,
@@ -217,16 +223,20 @@ class Transition(nn.Module):
         key = (dtype, tuple((w.data_ptr(), w._version) for w in weights))
         cached = getattr(self, "_fused_w_cache", None)
         if cached is None or cached[0] != key:
-            w_ab = torch.cat(weights[:2], 0).to(dtype)
-            self._fused_w_cache = (key, (w_ab, weights[2].to(dtype)))
+            w_a, w_b = (w.to(dtype) for w in weights[:2])
+            w_il = None
+            if w_a.shape[0] % 128 == 0:
+                w_il = interleave_swiglu_weight(w_a, w_b)
+            self._fused_w_cache = (key, (torch.cat([w_a, w_b], 0), w_il, weights[2].to(dtype)))
         return self._fused_w_cache[1]
 
     def _fused_eval(self, x: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
-        """Inference path for large inputs: one GEMM for both up-projections,
-        a fused SwiGLU kernel, and contiguous row chunks (bounded by
-        ``chunk_size`` along the penultimate dimension, but never below
+        """Inference path for large inputs: both up-projections and SwiGLU in
+        one GEMM (swiglu_matmul) where it applies, else one cuBLAS GEMM and a
+        fused SwiGLU kernel; contiguous row chunks (bounded by ``chunk_size``
+        along the penultimate dimension, but never below
         ``_FUSED_TRANSITION_MIN_ROWS`` rows, below which it gets slower)."""
-        from mol.model.modules.triton_swiglu import silu_mul
+        from mol.model.modules.triton_swiglu import silu_mul, swiglu_matmul, swiglu_matmul_ok
 
         x2 = x.reshape(-1, self.c_in)
         rows = x2.shape[0]
@@ -238,16 +248,16 @@ class Transition(nn.Module):
             if torch.is_autocast_enabled("cuda")
             else x.dtype
         )
-        w_ab, w_o = self._fused_weights(dtype)
+        w_ab, w_il, w_o = self._fused_weights(dtype)
         out = torch.empty((rows, self.c_in), device=x.device, dtype=dtype)
         with torch.amp.autocast("cuda", enabled=False):
             for start in range(0, rows, per):
-                y = self.layernorm1(x2[start : start + per]).to(dtype)
-                torch.mm(
-                    silu_mul(torch.mm(y, w_ab.t())),
-                    w_o.t(),
-                    out=out[start : start + per],
-                )
+                y = self.layernorm1(x2[start : start + per]).to(dtype).contiguous()
+                if _SWIGLU_MATMUL and w_il is not None and swiglu_matmul_ok(y, w_o.shape[1]):
+                    h = swiglu_matmul(y, w_il)
+                else:
+                    h = silu_mul(torch.mm(y, w_ab.t()))
+                torch.mm(h, w_o.t(), out=out[start : start + per])
         return out.view(*x.shape[:-1], self.c_in).to(x.dtype)
 
     def _eval_chunk(self, chunk: torch.Tensor) -> torch.Tensor:
