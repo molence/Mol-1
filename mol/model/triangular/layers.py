@@ -738,6 +738,15 @@ class OuterProductMean(nn.Module):
         # [*, N_res, N_res, C, C]
         outer = torch.einsum("...bac,...dae->...bdce", a, b)
 
+        if outer.dim() == 4 and outer.is_cuda and not outer.is_contiguous():
+            # einsum returns a [b, d, c, e] view of a [b, c, d, e] product;
+            # copy it into place with a bandwidth-bound kernel.
+            from mol.model.triangular.triton_permute import swap12, swap12_ok
+
+            src = outer.permute(0, 2, 1, 3)
+            if swap12_ok(src):
+                outer = swap12(src)
+
         # [*, N_res, N_res, C * C]
         outer = outer.reshape(outer.shape[:-2] + (-1,))
 

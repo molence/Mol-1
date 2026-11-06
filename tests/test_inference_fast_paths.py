@@ -236,6 +236,26 @@ class TF32AttentionTest(unittest.TestCase):
 
 
 @unittest.skipUnless(CUDA, "needs CUDA")
+class OuterProductMeanTest(unittest.TestCase):
+    def test_swap12_matches_permute(self):
+        from mol.model.triangular.triton_permute import swap12
+
+        x = torch.randn(37, 32, 45, 32, device="cuda", dtype=torch.bfloat16)
+        self.assertTrue(torch.equal(swap12(x), x.permute(0, 2, 1, 3).contiguous()))
+
+    def test_opm_matches_reference(self):
+        from mol.model.triangular.layers import OuterProductMean
+
+        mod = _init(OuterProductMean(c_m=16, c_z=24, c_hidden=8))
+        a = torch.randn(30, 20, 8, device="cuda")
+        b = torch.randn(30, 20, 8, device="cuda")
+        with torch.no_grad():
+            out = mod._opm(a, b)
+            ref = mod.linear_out(torch.einsum("...bac,...dae->...bdce", a, b).reshape(30, 30, 64))
+        torch.testing.assert_close(out, ref)
+
+
+@unittest.skipUnless(CUDA, "needs CUDA")
 class GraphedDenoiseStepTest(unittest.TestCase):
     def test_replay_matches_eager(self):
         from mol.model.cuda_graph import GraphedDenoiseStep
