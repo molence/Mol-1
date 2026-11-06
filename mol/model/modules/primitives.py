@@ -656,6 +656,12 @@ def _local_attention(
     """
     assert q.shape == k.shape == v.shape  # local attention doesn't make sense if Q != K
 
+    if q.is_cuda:
+        from mol.model.modules.triton_attention import local_attention, local_attention_ok
+
+        if local_attention_ok(q, k, v, attn_bias, trunked_attn_bias, n_queries, n_keys):
+            return local_attention(q, k, v, trunked_attn_bias, n_queries, n_keys)
+
     # Prepare for attention qkv, q: [..., n_trunks, n_queries, d], kv: [..., n_trunks, n_keys, d]
 
     # Rerrange to dense trunks

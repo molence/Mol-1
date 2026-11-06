@@ -204,6 +204,33 @@ class TF32AttentionTest(unittest.TestCase):
         torch.testing.assert_close(out, ref, atol=5e-3, rtol=1e-2)
 
 
+    def test_local_attention_matches_trunked_reference(self):
+        import mol.model.modules.primitives as prim
+        import mol.model.modules.triton_attention as ta
+
+        torch.manual_seed(0)
+        n, d = 300, 32  # not a multiple of the 32-query window
+        q, k, v = (torch.randn(2, 4, n, d, device="cuda") * 0.5 for _ in range(3))
+        n_trunks = (n + 31) // 32
+        bias = torch.randn(4, n_trunks, 32, 128, device="cuda")  # broadcast over the batch
+        old = torch.backends.cuda.matmul.allow_tf32
+        try:
+            for tf32, atol in ((False, 1e-5), (True, 5e-3)):
+                torch.backends.cuda.matmul.allow_tf32 = tf32
+                with torch.no_grad():
+                    self.assertEqual(ta.local_attention_ok(q, k, v, None, bias, 32, 128), tf32)
+                    # Exercise the kernel in full FP32 too, though only used with TF32.
+                    out = ta.local_attention(q, k, v, bias, 32, 128)
+                    ta._ENABLED = False
+                    try:
+                        ref = prim._local_attention(q, k, v, 32, 128, trunked_attn_bias=bias)
+                    finally:
+                        ta._ENABLED = True
+                torch.testing.assert_close(out, ref, atol=atol, rtol=1e-2)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = old
+
+
 @unittest.skipUnless(CUDA, "needs CUDA")
 class GraphedDenoiseStepTest(unittest.TestCase):
     def test_replay_matches_eager(self):
