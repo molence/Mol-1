@@ -18,7 +18,9 @@ The attention kernel returns ``o`` as [N, H, Q, D]; the gate ``g`` comes out
 of the projection as [N, Q, H*D] (possibly a column slice of a wider
 projection). This computes ``sigmoid(g) * o`` and writes it as a contiguous
 [N, Q, H*D] tensor ready for the output projection, in one pass instead of a
-sigmoid, a strided multiply and a reshape copy.
+sigmoid, a strided multiply and a reshape copy. With ``transposed=True`` the
+gate is read as, and the result written as, the [Q, N, H*D] layout, which
+lets ending-node attention run on the untransposed pair tensor.
 """
 
 import torch
@@ -28,7 +30,7 @@ import triton.language as tl
 
 @triton.jit
 def _sigmoid_gate_kernel(
-    O, G, Y, Q, g_row_stride,
+    O, G, Y, Q, g_n_stride, g_q_stride, y_n_stride, y_q_stride,
     H: tl.constexpr, D: tl.constexpr,
     BLOCK_Q: tl.constexpr, BLOCK_C: tl.constexpr,
 ):
@@ -38,23 +40,30 @@ def _sigmoid_gate_kernel(
     h = c // D
     d = c % D
     mask = (q < Q)[:, None] & (c < H * D)[None, :]
-    row = (n * Q + q).to(tl.int64)
-    g = tl.load(G + row[:, None] * g_row_stride + c[None, :], mask=mask, other=0.0)
+    q64 = q.to(tl.int64)
+    g = tl.load(G + (n * g_n_stride + q64 * g_q_stride)[:, None] + c[None, :], mask=mask, other=0.0)
     o_off = ((n * H + h[None, :]).to(tl.int64) * Q + q[:, None]) * D + d[None, :]
     o = tl.load(O + o_off, mask=mask, other=0.0)
     y = o.to(tl.float32) * tl.sigmoid(g.to(tl.float32))
-    tl.store(Y + row[:, None] * (H * D) + c[None, :], y.to(Y.dtype.element_ty), mask=mask)
+    tl.store(Y + (n * y_n_stride + q64 * y_q_stride)[:, None] + c[None, :], y.to(Y.dtype.element_ty), mask=mask)
 
 
-def sigmoid_gate_transpose(o: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-    """o: [N, H, Q, D]; g: [N, Q, H*D] with unit column stride. Returns [N, Q, H*D]."""
+def sigmoid_gate_transpose(o: torch.Tensor, g: torch.Tensor, transposed: bool = False) -> torch.Tensor:
+    """o: [N, H, Q, D]; g: [N, Q, H*D] with unit column stride. Returns [N, Q, H*D].
+
+    transposed: g is given as [Q, N, H*D] and the result is returned as [Q, N, H*D].
+    """
     n, h, q, d = o.shape
     o = o.contiguous()
-    assert g.shape == (n, q, h * d) and g.stride(-1) == 1 and g.stride(0) == q * g.stride(1)
-    y = torch.empty((n, q, h * d), device=o.device, dtype=o.dtype)
+    if transposed:
+        g = g.transpose(0, 1)
+    assert g.shape == (n, q, h * d) and g.stride(-1) == 1
+    y = torch.empty((q, n, h * d) if transposed else (n, q, h * d), device=o.device, dtype=o.dtype)
+    y_view = y.transpose(0, 1) if transposed else y
     block_q, block_c = 32, 64
     grid = (n, triton.cdiv(q, block_q), triton.cdiv(h * d, block_c))
     _sigmoid_gate_kernel[grid](
-        o, g, y, q, g.stride(1), H=h, D=d, BLOCK_Q=block_q, BLOCK_C=block_c, num_warps=4
+        o, g, y, q, g.stride(0), g.stride(1), y_view.stride(0), y_view.stride(1),
+        H=h, D=d, BLOCK_Q=block_q, BLOCK_C=block_c, num_warps=4,
     )
     return y

@@ -53,6 +53,21 @@ def _unpad_pair(z: torch.Tensor, n_token: int) -> torch.Tensor:
     return z[..., :n_token, :n_token, :]
 
 
+def _fused_triangle_attention(
+    block, z, pair_mask, triangle_attention, chunk_size, inplace_safe=False
+):
+    """z after starting- and ending-node triangle attention with their residual
+    adds, on the inference fast path (no transposes of z); None if it does not apply."""
+    z_new = block.tri_att_start.fused_residual_update(
+        z, pair_mask, triangle_attention, chunk_size, ending=False, inplace_safe=inplace_safe
+    )
+    if z_new is None:
+        return None
+    return block.tri_att_end.fused_residual_update(
+        z_new, pair_mask, triangle_attention, chunk_size, ending=True, inplace_safe=True
+    )
+
+
 class PairformerBlock(nn.Module):
     """Implements Algorithm 17 [Line2-Line8] in AF3
 
@@ -168,22 +183,28 @@ class PairformerBlock(nn.Module):
                 _add_with_inplace=True,
                 triangle_multiplicative=triangle_multiplicative,
             )
-            z += self.tri_att_start(
-                z,
-                mask=pair_mask,
-                triangle_attention=triangle_attention,
-                inplace_safe=inplace_safe,
-                chunk_size=chunk_size,
+            z_att = _fused_triangle_attention(
+                self, z, pair_mask, triangle_attention, chunk_size, inplace_safe=True
             )
-            z = z.transpose(-2, -3).contiguous()
-            z += self.tri_att_end(
-                z,
-                mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
-                triangle_attention=triangle_attention,
-                inplace_safe=inplace_safe,
-                chunk_size=chunk_size,
-            )
-            z = z.transpose(-2, -3).contiguous()
+            if z_att is not None:
+                z = z_att
+            else:
+                z += self.tri_att_start(
+                    z,
+                    mask=pair_mask,
+                    triangle_attention=triangle_attention,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+                z = z.transpose(-2, -3).contiguous()
+                z += self.tri_att_end(
+                    z,
+                    mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
+                    triangle_attention=triangle_attention,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+                z = z.transpose(-2, -3).contiguous()
             z += self.pair_transition(z, chunk_size=pair_transition_chunk_size)
         else:
             tmu_update = self.tri_mul_out(
@@ -204,32 +225,40 @@ class PairformerBlock(nn.Module):
             )
             z = dropout_add_rowwise(z, tmu_update, self.p_drop, self.training)
             del tmu_update
-            z = dropout_add_rowwise(
-                z,
-                self.tri_att_start(
+            z_att = None
+            if not self.training:
+                z_att = _fused_triangle_attention(
+                    self, z, pair_mask, triangle_attention, chunk_size
+                )
+            if z_att is not None:
+                z = z_att
+            else:
+                z = dropout_add_rowwise(
                     z,
-                    mask=pair_mask,
-                    triangle_attention=triangle_attention,
-                    inplace_safe=inplace_safe,
-                    chunk_size=chunk_size,
-                ),
-                self.p_drop,
-                self.training,
-            )
-            z = z.transpose(-2, -3).contiguous()
-            z = dropout_add_rowwise(
-                z,
-                self.tri_att_end(
+                    self.tri_att_start(
+                        z,
+                        mask=pair_mask,
+                        triangle_attention=triangle_attention,
+                        inplace_safe=inplace_safe,
+                        chunk_size=chunk_size,
+                    ),
+                    self.p_drop,
+                    self.training,
+                )
+                z = z.transpose(-2, -3).contiguous()
+                z = dropout_add_rowwise(
                     z,
-                    mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
-                    triangle_attention=triangle_attention,
-                    inplace_safe=inplace_safe,
-                    chunk_size=chunk_size,
-                ),
-                self.p_drop,
-                self.training,
-            )
-            z = z.transpose(-2, -3).contiguous()
+                    self.tri_att_end(
+                        z,
+                        mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
+                        triangle_attention=triangle_attention,
+                        inplace_safe=inplace_safe,
+                        chunk_size=chunk_size,
+                    ),
+                    self.p_drop,
+                    self.training,
+                )
+                z = z.transpose(-2, -3).contiguous()
 
             z = z + self.pair_transition(z, chunk_size=pair_transition_chunk_size)
         if self.c_s > 0:

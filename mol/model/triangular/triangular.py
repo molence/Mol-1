@@ -747,9 +747,22 @@ class TriangleAttention(nn.Module):
             self._fused_w_cache = (key, w)
         return self._fused_w_cache[1]
 
-    def _fused_inference_forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def _fused_inference_forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        ending: bool = False,
+        residual: Optional[torch.Tensor] = None,
+        inplace: bool = False,
+    ) -> torch.Tensor:
         """Inference fast path: one projection GEMM, cuEquivariance attention,
-        fused sigmoid gating. Same math as the mha path."""
+        fused sigmoid gating. Same math as the mha path.
+
+        ending: attend along the first axis of ``x`` (ending-node attention on
+        the untransposed pair tensor) instead of transposing ``x`` and the result.
+        residual: [I, J, C] tensor added to the output in the output GEMM.
+        inplace: accumulate into ``residual`` itself instead of a new tensor.
+        """
         from mol.model.triangular.fused_gate import sigmoid_gate_transpose
         from mol.model.triangular.layers import cuequivariance_triangular_attn
 
@@ -759,22 +772,57 @@ class TriangleAttention(nn.Module):
         dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else x.dtype
         with torch.amp.autocast("cuda", enabled=False):
             proj = F.linear(x.to(dtype), self._fused_projection_weight(dtype))
-            # [I, H, J, D] views; the kernel takes these strides as they are.
+            # [I, H, J, D] views (ending: [J, H, I, D]); the kernel takes these strides as they are.
+            perm = (1, 2, 0, 3) if ending else (0, 2, 1, 3)
             q, k, v = (
-                proj[..., i * hd : (i + 1) * hd].view(n_i, n_j, h, d).transpose(-2, -3)
+                proj[..., i * hd : (i + 1) * hd].view(n_i, n_j, h, d).permute(perm)
                 for i in range(3)
             )
             g = proj[..., 3 * hd : 4 * hd]
-            # [1, H, I, J]
-            bias = proj[..., 4 * hd : 4 * hd + h].permute(2, 0, 1).unsqueeze(0)
+            # [1, H, I, J] (ending: [1, H, J, I])
+            bias = proj[..., 4 * hd : 4 * hd + h].permute((2, 1, 0) if ending else (2, 0, 1)).unsqueeze(0)
             if dtype == torch.float32:
                 bias = bias.contiguous()
+            key_mask = (mask.t() if ending else mask) != 0
             o = cuequivariance_triangular_attn(
-                q, k, v, bias, (mask != 0)[:, None, None, :], 1.0 / math.sqrt(d)
+                q, k, v, bias, key_mask.contiguous()[:, None, None, :], 1.0 / math.sqrt(d)
             )
-            o = sigmoid_gate_transpose(o, g)
-            w_o = self.mha.linear_o.weight
-            return F.linear(o, w_o.to(dtype))
+            # [I, J, H*D] in both cases
+            o = sigmoid_gate_transpose(o, g, transposed=ending)
+            w_o = self.mha.linear_o.weight.to(dtype)
+            if residual is not None and residual.dtype == dtype and residual.is_contiguous():
+                c = w_o.shape[0]
+                if inplace:
+                    residual.view(-1, c).addmm_(o.view(-1, hd), w_o.t())
+                    return residual
+                return torch.addmm(residual.view(-1, c), o.view(-1, hd), w_o.t()).view(residual.shape)
+            out = F.linear(o, w_o)
+            return out if residual is None else residual + out
+
+    def fused_residual_update(
+        self,
+        z: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        triangle_attention: str,
+        chunk_size: Optional[int],
+        ending: bool,
+        inplace_safe: bool = False,
+    ) -> Optional[torch.Tensor]:
+        """z + attention(z) at inference, for starting- or ending-node attention
+        on the untransposed pair tensor, without transposing it. Returns None
+        when the fast path does not apply (the caller then uses forward())."""
+        if not (
+            self.starting
+            and self._fused_inference_ok(z, triangle_attention, chunk_size)
+            and z.shape[0] == z.shape[1]
+            and _tri_pad_amount(z) == 0
+        ):
+            return None
+        if mask is None:
+            mask = z.new_ones(z.shape[:-1])
+        return self._fused_inference_forward(
+            self.layer_norm(z), mask, ending=ending, residual=z, inplace=inplace_safe
+        )
 
     @torch.jit.ignore
     def _chunk(
