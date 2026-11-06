@@ -53,6 +53,25 @@ def _unpad_pair(z: torch.Tensor, n_token: int) -> torch.Tensor:
     return z[..., :n_token, :n_token, :]
 
 
+def _pad_pair_for_triangle_ops(z, pair_mask, triangle_multiplicative, triangle_attention):
+    """Pad [N, N, C] z (and the pair mask) to the multiple of tokens the
+    cuEquivariance triangle kernels want, once for a run of triangle ops
+    instead of in every op (see _tri_pad_amount). Returns (z, pair_mask, pad)."""
+    pad = (
+        _tri_pad_amount(z)
+        if z.dim() == 3
+        and "cuequivariance" in (triangle_multiplicative, triangle_attention)
+        else 0
+    )
+    if pad:
+        n_token = z.shape[-2]
+        z = F.pad(z, (0, 0, 0, pad, 0, pad))
+        if pair_mask is None:
+            pair_mask = z.new_ones((n_token, n_token))
+        pair_mask = F.pad(pair_mask, (0, pad, 0, pad))
+    return z, pair_mask, pad
+
+
 def _fused_triangle_attention(
     block, z, pair_mask, triangle_attention, chunk_size, inplace_safe=False
 ):
@@ -596,17 +615,9 @@ class PairformerStack(nn.Module):
         # Pad the pair tensor once for the whole stack instead of in every
         # triangle op (see _tri_pad_amount); padded pairs are masked out.
         n_token = z.shape[-2]
-        pad = (
-            _tri_pad_amount(z)
-            if z.dim() == 3
-            and "cuequivariance" in (triangle_multiplicative, triangle_attention)
-            else 0
+        z, pair_mask, pad = _pad_pair_for_triangle_ops(
+            z, pair_mask, triangle_multiplicative, triangle_attention
         )
-        if pad:
-            z = F.pad(z, (0, 0, 0, pad, 0, pad))
-            if pair_mask is None:
-                pair_mask = z.new_ones((n_token, n_token))
-            pair_mask = F.pad(pair_mask, (0, pad, 0, pad))
 
         blocks = self._prep_blocks(
             pair_mask=pair_mask,
@@ -938,7 +949,11 @@ class MSABlock(nn.Module):
         if not self.is_last_block:
             # MSA stack
             m = self.msa_stack(m, z, msa_chunk_size=msa_chunk_size)
-        # Pair stack
+        # Pair stack, on a padded pair tensor (see _pad_pair_for_triangle_ops)
+        n_token = z.shape[-2]
+        z, pair_mask, pad = _pad_pair_for_triangle_ops(
+            z, pair_mask, triangle_multiplicative, triangle_attention
+        )
         _, z = self.pair_stack(
             s=None,
             z=z,
@@ -949,6 +964,8 @@ class MSABlock(nn.Module):
             chunk_size=chunk_size,
             pair_transition_chunk_size=pair_transition_chunk_size,
         )
+        if pad:
+            z = z[..., :n_token, :n_token, :].contiguous()
         if not self.is_last_block:
             return m, z
         else:
