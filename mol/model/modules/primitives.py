@@ -368,6 +368,11 @@ def _attention(
         # dtype the way the branch below does, so the result can feed
         # low-precision layers. Both casts are no-ops on the paths above.
         v = v.to(dtype=torch.float32)
+        if q.is_cuda and torch.backends.cuda.matmul.allow_tf32:
+            from mol.model.modules.triton_attention import tf32_attention, tf32_attention_ok
+
+            if tf32_attention_ok(q, k, v, attn_bias):
+                return tf32_attention(q, k, v, attn_bias).to(dtype=input_dtype)
         attn_output = F.scaled_dot_product_attention(
             query=q,
             key=k,
