@@ -151,3 +151,4 @@ scripts/msa/data/mmcif_msa*/
 # perf bench outputs
 bench/results/
 bench/logs/
+bench/scratch/

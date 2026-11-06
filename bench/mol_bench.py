@@ -10,7 +10,9 @@ Usage (inside the container, from the repo root):
 Everything after ``--`` is passed to the runner config parser, e.g.
     --enable_tf32 true --infer_setting.sample_diffusion_chunk_size 5
 Environment knobs read here: MOL_BENCH_PROFILE=<path> writes a torch profiler
-trace of the last repeat.
+trace of the last repeat; MOL_BENCH_NVTX=1 adds NVTX ranges per stage and per
+module and limits CUDA profiling (nsys --capture-range=cudaProfilerApi) to the
+last repeat.
 """
 
 import argparse
@@ -40,11 +42,18 @@ from mol.utils.seed import seed_everything  # noqa: E402
 TIMES = defaultdict(float)
 
 
+NVTX = os.environ.get("MOL_BENCH_NVTX") == "1"
+
+
 @contextmanager
 def stage(name):
     torch.cuda.synchronize()
     t = time.perf_counter()
+    if NVTX:
+        torch.cuda.nvtx.range_push(name)
     yield
+    if NVTX:
+        torch.cuda.nvtx.range_pop()
     torch.cuda.synchronize()
     TIMES[name] += time.perf_counter() - t
 
@@ -89,6 +98,27 @@ def install_module_timers(model):
 
         mod.register_forward_pre_hook(pre)
         mod.register_forward_hook(post)
+
+
+def install_nvtx_ranges(model):
+    """NVTX range per module of interest, named by path with block indices dropped (no syncs)."""
+    import re
+
+    types = {
+        "TriangleMultiplicationOutgoing", "TriangleMultiplicationIncoming", "TriangleAttention",
+        "Transition", "AttentionPairBias", "OuterProductMean", "MSAPairWeightedAveraging",
+        "PairformerWidthAdapter", "AtomAttentionEncoder", "AtomAttentionDecoder",
+        "DiffusionTransformer", "DiffusionConditioning", "InputFeatureEmbedder", "TemplateEmbedder",
+        "MSAModule", "PairformerStack", "PairformerBlock", "ConfidenceHead",
+    }
+    for name, mod in model.named_modules():
+        if type(mod).__name__ not in types:
+            continue
+        key = re.sub(r"\.\d+\.", ".*.", name)
+        key = re.sub(r"\.\d+$", ".*", key)
+        # Hooks must return None (a pre-hook's return value replaces the inputs).
+        mod.register_forward_pre_hook(lambda m, a, key=key: None if torch.cuda.nvtx.range_push(key) else None)
+        mod.register_forward_hook(lambda m, a, o: None if torch.cuda.nvtx.range_pop() else None)
 
 
 def build_configs(extra):
@@ -142,6 +172,8 @@ def main():
 
     if os.environ.get("MOL_BENCH_MODTIME") == "1":
         install_module_timers(model)
+    if NVTX:
+        install_nvtx_ranges(model)
 
     dl = inf.get_inference_dataloader(configs=configs)
     data, atom_array, err = next(iter(dl))[0]
@@ -171,10 +203,14 @@ def main():
             )
             prof.__enter__()
         torch.cuda.synchronize()
+        if NVTX and last:
+            torch.cuda.profiler.start()
         t0 = time.perf_counter()
         pred = runner.predict({**data, "input_feature_dict": dict(data["input_feature_dict"])})
         torch.cuda.synchronize()
         total = time.perf_counter() - t0
+        if NVTX and last:
+            torch.cuda.profiler.stop()
         if prof is not None:
             prof.__exit__(None, None, None)
             prof.export_chrome_trace(prof_path)
