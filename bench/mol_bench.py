@@ -116,6 +116,18 @@ def install_nvtx_ranges(model):
             continue
         key = re.sub(r"\.\d+\.", ".*.", name)
         key = re.sub(r"\.\d+$", ".*", key)
+        if type(mod).__name__ == "TriangleAttention":
+            # The fused inference path calls this method instead of forward().
+            fn = mod.fused_residual_update
+
+            def ranged(*a, key=key, fn=fn, **k):
+                torch.cuda.nvtx.range_push(key)
+                try:
+                    return fn(*a, **k)
+                finally:
+                    torch.cuda.nvtx.range_pop()
+
+            mod.fused_residual_update = ranged
         # Hooks must return None (a pre-hook's return value replaces the inputs).
         mod.register_forward_pre_hook(lambda m, a, key=key: None if torch.cuda.nvtx.range_push(key) else None)
         mod.register_forward_hook(lambda m, a, o: None if torch.cuda.nvtx.range_pop() else None)
