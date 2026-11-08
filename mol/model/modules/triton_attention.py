@@ -89,9 +89,9 @@ def _attn_fwd_kernel(
 
 @triton.jit
 def _attn_fwd_tma_kernel(
-    q_desc, k_desc, v_desc, b_desc, O, so0, so1, som, G, sg0, sg1, sgm,
-    H, M, N,
-    D: tl.constexpr, B0: tl.constexpr, B1: tl.constexpr, HAS_GATE: tl.constexpr,
+    q_desc, k_desc, v_desc, b_desc, O, so0, so1, som, G, sg0, sg1, sgm, KM, skm0, skmn,
+    H, M, N, scale,
+    D: tl.constexpr, B0: tl.constexpr, B1: tl.constexpr, HAS_GATE: tl.constexpr, HAS_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # As _attn_fwd_kernel, with q/k/v/bias tiles fetched by TMA and the key
@@ -100,13 +100,14 @@ def _attn_fwd_tma_kernel(
     # kernel is latency-bound (one row of the softmax per thread); the
     # pipelined loads take about 30% off the plain kernel on GB300. With
     # HAS_GATE the output is multiplied by sigmoid(G) (the attention module's
-    # output gate) before it is stored.
+    # output gate) before it is stored. With HAS_MASK, keys where KM[z0, n]
+    # is 0 get -1e9 added to their logits (as the reference mask bias).
     pid_m = tl.program_id(0)
     pid_z = tl.program_id(1)
     z0 = pid_z // H
     z1 = pid_z % H
     m0 = pid_m * BLOCK_M
-    q = q_desc.load([z0, m0, z1, 0]).reshape(BLOCK_M, BLOCK_D) * 1.4426950408889634
+    q = q_desc.load([z0, m0, z1, 0]).reshape(BLOCK_M, BLOCK_D) * (scale * 1.4426950408889634)
     bz0 = z0 if B0 else 0
     bz1 = z1 if B1 else 0
     m_i = tl.full((BLOCK_M,), float("-inf"), tl.float32)
@@ -117,6 +118,9 @@ def _attn_fwd_tma_kernel(
         k = k_desc.load([z0, start, z1, 0]).reshape(BLOCK_N, BLOCK_D)
         s = tl.dot(q, k.T, input_precision="tf32")
         s += b_desc.load([bz0, bz1, m0, start]).reshape(BLOCK_M, BLOCK_N) * 1.4426950408889634
+        if HAS_MASK:
+            km = tl.load(KM + z0.to(tl.int64) * skm0 + (start + offs_n) * skmn, mask=start + offs_n < N, other=1)
+            s = tl.where((km != 0)[None, :], s, s - 1e9 * 1.4426950408889634)
         s = tl.where((start + offs_n < N)[None, :], s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
         p = tl.exp2(s - m_new[:, None])
@@ -147,7 +151,7 @@ def _tma_ok(t: torch.Tensor) -> bool:
     )
 
 
-def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None) -> Optional[torch.Tensor]:
+def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None, key_mask=None, scale=1.0) -> Optional[torch.Tensor]:
     """The TMA kernel when the layout allows it (Blackwell, d <= 64, a bias
     whose leading dims are 1 or match), else None. gate/out: optional
     [*lead, m, d] views (any strides, unit last) for the output gate and the
@@ -163,9 +167,10 @@ def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None) -> Optiona
         return None
     from triton.tools.tensor_descriptor import TensorDescriptor
 
-    bm, bn, bd = _TMA_BLOCK_M, _TMA_BLOCK_N, 64
+    bm, bn, bd = _TMA_BLOCK_M, _TMA_BLOCK_N, max(16, triton.next_power_of_2(d))
     o = torch.empty((*lead, m, d), device=q4.device, dtype=q4.dtype) if out is None else out
     g = o if gate is None else gate
+    km = o if key_mask is None else key_mask
     _attn_fwd_tma_kernel[(triton.cdiv(m, bm), lead[0] * lead[1])](
         # [S, M, H, D] order (tokens outside heads), as the projections lay
         # them out; with heads outside tokens the kernel is 1.6x slower.
@@ -175,8 +180,9 @@ def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None) -> Optiona
         TensorDescriptor.from_tensor(b4, [1, 1, bm, bn]),
         o, o.stride(0), o.stride(1), o.stride(2),
         g, g.stride(0), g.stride(1), g.stride(2),
-        lead[1], m, n,
-        D=d, B0=b4.shape[0] != 1, B1=b4.shape[1] != 1, HAS_GATE=gate is not None,
+        km, km.stride(0), km.stride(-1),
+        lead[1], m, n, scale,
+        D=d, B0=b4.shape[0] != 1, B1=b4.shape[1] != 1, HAS_GATE=gate is not None, HAS_MASK=key_mask is not None,
         BLOCK_M=bm, BLOCK_N=bn, BLOCK_D=bd,
         num_warps=4,
     )
@@ -184,11 +190,19 @@ def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None) -> Optiona
 
 
 def gated_attention(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, gate: torch.Tensor, out: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    gate: torch.Tensor,
+    out: torch.Tensor,
+    key_mask: Optional[torch.Tensor] = None,
+    scale: float = 1.0,
 ) -> bool:
-    """out = softmax(q k^T + bias) v * sigmoid(gate), all [S, H, M, D] views
-    (bias [1 or S, 1 or H, M, N]), in one TMA kernel. Returns False (nothing
-    written) where that kernel does not apply."""
+    """out = softmax(scale * q k^T + bias - 1e9 * (1 - key_mask)) v * sigmoid(gate),
+    all [S, H, M, D] views (bias [1 or S, 1 or H, M, N]; key_mask [S, N]), in
+    one TMA kernel. Returns False (nothing written) where that kernel does
+    not apply."""
     if not (_ENABLED and _TMA and tf32_attention_ok(q, k, v, bias) and q.dim() == 4):
         return False
     s_, h, m, d = q.shape
@@ -196,7 +210,12 @@ def gated_attention(
         return False
     if gate.stride(-1) != 1 or out.stride(-1) != 1:
         return False
-    return _tma_attention(q, k, v, bias, (s_, h), m, k.shape[-2], d, gate=gate, out=out) is not None
+    if key_mask is not None and key_mask.shape != (s_, k.shape[-2]):
+        return False
+    return (
+        _tma_attention(q, k, v, bias, (s_, h), m, k.shape[-2], d, gate=gate, out=out, key_mask=key_mask, scale=scale)
+        is not None
+    )
 
 
 def _as_4d(x: torch.Tensor) -> torch.Tensor:

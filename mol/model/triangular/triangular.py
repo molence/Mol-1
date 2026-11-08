@@ -790,11 +790,27 @@ class TriangleAttention(nn.Module):
             if dtype == torch.float32:
                 bias = bias.contiguous()
             key_mask = (mask.t() if ending else mask) != 0
-            o = cuequivariance_triangular_attn(
-                q, k, v, bias, key_mask.contiguous()[:, None, None, :], 1.0 / math.sqrt(d)
-            )
-            # [I, J, H*D] in both cases
-            o = sigmoid_gate_transpose(o, g, transposed=ending)
+            o = None
+            if dtype == torch.float32:
+                # FP32 (the confidence head) with TF32 enabled: the TF32 TMA
+                # attention kernel with the gate fused; cuEquivariance's FP32
+                # path is an sm80 kernel about 4x slower.
+                from mol.model.modules.triton_attention import gated_attention
+
+                o = torch.empty((n_i, n_j, h, d), device=x.device, dtype=dtype)
+                gate = g.view(n_i, n_j, h, d).permute(perm)
+                if gated_attention(
+                    q, k, v, bias, gate, o.permute(perm), key_mask=key_mask, scale=1.0 / math.sqrt(d)
+                ):
+                    o = o.view(n_i, n_j, hd)
+                else:
+                    o = None
+            if o is None:
+                o = cuequivariance_triangular_attn(
+                    q, k, v, bias, key_mask.contiguous()[:, None, None, :], 1.0 / math.sqrt(d)
+                )
+                # [I, J, H*D] in both cases
+                o = sigmoid_gate_transpose(o, g, transposed=ending)
             w_o = self.mha.linear_o.weight.to(dtype)
             if residual is not None and residual.dtype == dtype and residual.is_contiguous():
                 c = w_o.shape[0]

@@ -81,6 +81,38 @@ class TriangleFastPathTest(unittest.TestCase):
             keep = mask.bool()
             torch.testing.assert_close(out[keep], ref[keep], atol=2e-3, rtol=2e-2)
 
+    def test_triangle_attention_fp32_tf32_kernel(self):
+        """FP32 with TF32 enabled (the confidence head): the TMA attention
+        kernel with the mask and gate fused, both directions."""
+        import mol.model.modules.triton_attention as ta
+        import mol.model.triangular.triangular as tri
+
+        n = 136
+        used = []
+        orig = ta.gated_attention
+        ta.gated_attention = lambda *a, **k: used.append(orig(*a, **k)) or used[-1]
+        old = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            for starting in (True, False):
+                mod = _init(tri.TriangleAttention(c_in=64, c_hidden=32, no_heads=4, starting=starting))
+                z = torch.randn(n, n, 64, device="cuda")
+                mask = self._mask(n, z.dtype)
+                call = lambda: mod(z, mask=mask, chunk_size=1024, triangle_attention="cuequivariance")
+                with torch.no_grad():
+                    tri._FUSED_TRI_ATT = False
+                    try:
+                        ref = call()
+                    finally:
+                        tri._FUSED_TRI_ATT = True
+                    out = call()
+                keep = mask.bool()
+                torch.testing.assert_close(out[keep], ref[keep], atol=5e-3, rtol=1e-2)
+        finally:
+            ta.gated_attention = orig
+            torch.backends.cuda.matmul.allow_tf32 = old
+        self.assertTrue(used and all(used))
+
     def test_triangle_attention_residual_update_matches_transposed_path(self):
         """Ending-node attention on the untransposed pair tensor, residual fused."""
         import mol.model.triangular.triangular as tri
