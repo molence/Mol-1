@@ -189,23 +189,29 @@ class TransitionAndPairBiasFastPathTest(unittest.TestCase):
 @unittest.skipUnless(CUDA, "needs CUDA")
 class TF32AttentionTest(unittest.TestCase):
     def test_matches_fp32_sdpa(self):
-        from mol.model.modules.triton_attention import tf32_attention, tf32_attention_ok
+        import mol.model.modules.triton_attention as ta
 
         torch.manual_seed(0)
-        # Diffusion transformer layout: strided heads, bias broadcast over samples.
-        q, k, v = (torch.randn(3, 200, 4, 48, device="cuda").transpose(1, 2) * 0.4 for _ in range(3))
-        bias = torch.randn(1, 4, 200, 200, device="cuda") * 2
-        bias[..., 150:] = -1e9
         old = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = True
         try:
-            with torch.no_grad():
-                self.assertTrue(tf32_attention_ok(q, k, v, bias))
-                out = tf32_attention(q, k, v, bias)
-                ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias, scale=1.0)
+            # (tokens, bias shape): the diffusion transformer layout (strided
+            # heads, bias broadcast over samples), a bias per sample, and a key
+            # count whose bias rows are not 16-byte aligned (no TMA).
+            for n, bias_lead in ((200, (1, 4)), (200, (3, 4)), (198, (1, 4))):
+                q, k, v = (torch.randn(3, n, 4, 48, device="cuda").transpose(1, 2) * 0.4 for _ in range(3))
+                bias = torch.randn(*bias_lead, n, n, device="cuda") * 2
+                bias[..., 150:] = -1e9
+                for tma in (True, False):
+                    ta._TMA = tma
+                    with torch.no_grad():
+                        self.assertTrue(ta.tf32_attention_ok(q, k, v, bias))
+                        out = ta.tf32_attention(q, k, v, bias)
+                        ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=bias, scale=1.0)
+                    torch.testing.assert_close(out, ref, atol=5e-3, rtol=1e-2)
         finally:
             torch.backends.cuda.matmul.allow_tf32 = old
-        torch.testing.assert_close(out, ref, atol=5e-3, rtol=1e-2)
+            ta._TMA = True
 
 
     def test_local_attention_matches_trunked_reference(self):
@@ -275,6 +281,57 @@ class GraphedDenoiseStepTest(unittest.TestCase):
                 t = torch.full((2,), float(i + 1), device="cuda")
                 torch.testing.assert_close(step(x, t), net(x, t, feats), atol=1e-5, rtol=1e-5)
         self.assertIsNotNone(step.graph)
+
+
+@unittest.skipUnless(CUDA, "needs CUDA")
+class FusedDiffusionTransformerTest(unittest.TestCase):
+    def _compare(self, n, local, tf32):
+        import mol.model.modules.diffusion_fast as dfast
+        from mol.model.modules.transformer import DiffusionTransformer
+
+        torch.manual_seed(0)
+        dt = DiffusionTransformer(c_a=64, c_s=32, c_z=16, n_blocks=3, n_heads=4).cuda().eval()
+        with torch.no_grad():
+            for p in dt.parameters():  # the zero-initialized gates and outputs too
+                p.copy_(torch.randn_like(p) * 0.2 + (1.0 if p.dim() == 1 and "weight" in str(p.shape) else 0.0))
+        a = torch.randn(3, n, 64, device="cuda")
+        s = torch.randn(3, n, 32, device="cuda")
+        kwargs = {}
+        if local:
+            z = torch.randn(1, (n + 31) // 32, 32, 128, 16, device="cuda")
+            kwargs = dict(n_queries=32, n_keys=128)
+        else:
+            z = torch.randn(1, n, n, 16, device="cuda")  # leading batch dim, as in sampling
+        old = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+        try:
+            with torch.no_grad():
+                if not local:
+                    kwargs = dict(projected_pair_biases=dt.prepare_pair_biases(z))
+                self.assertTrue(dfast.fused_ok(dt, a, s))
+                out = dt(a, s, z, **kwargs)
+                dfast._ENABLED = False
+                try:
+                    ref = dt(a, s, z, **kwargs)
+                finally:
+                    dfast._ENABLED = True
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = old
+        tol = 2e-2 if tf32 else 1e-4
+        torch.testing.assert_close(out, ref, atol=tol * ref.abs().max().item(), rtol=tol)
+
+    def test_global_attention(self):
+        # 160 tokens: TMA attention with the gate fused; 150: bias rows not
+        # 16-byte aligned, SDPA and a separate gate.
+        for n in (160, 150):
+            for tf32 in (True, False):
+                with self.subTest(n=n, tf32=tf32):
+                    self._compare(n, local=False, tf32=tf32)
+
+    def test_local_attention(self):
+        for tf32 in (True, False):
+            with self.subTest(tf32=tf32):
+                self._compare(200, local=True, tf32=tf32)
 
 
 if __name__ == "__main__":

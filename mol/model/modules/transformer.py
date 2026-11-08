@@ -675,6 +675,14 @@ class DiffusionTransformer(nn.Module):
         # request-constant inference input.
         pair_biases_for_blocks = None if self.training else projected_pair_biases
 
+        from mol.model.modules import diffusion_fast
+
+        if diffusion_fast.fused_ok(self, a, s):
+            return diffusion_fast.fused_forward(
+                self, a, s, z, n_queries, n_keys, pair_biases_for_blocks, chunk_size,
+                enable_efficient_fusion,
+            )
+
         blocks = self._prep_blocks(
             n_queries=n_queries,
             n_keys=n_keys,

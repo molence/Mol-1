@@ -30,6 +30,8 @@ import triton.language as tl
 
 # MOL_TF32_ATTENTION=0 disables both kernels here (back to the PyTorch paths).
 _ENABLED = os.getenv("MOL_TF32_ATTENTION", "1") != "0"
+# MOL_TMA_ATTENTION=0 keeps the plain-load kernel on Blackwell.
+_TMA = os.getenv("MOL_TMA_ATTENTION", "1") != "0"
 
 
 @triton.jit
@@ -85,6 +87,116 @@ def _attn_fwd_kernel(
     )
 
 
+@triton.jit
+def _attn_fwd_tma_kernel(
+    q_desc, k_desc, v_desc, b_desc, O, so0, so1, som, G, sg0, sg1, sgm,
+    H, M, N,
+    D: tl.constexpr, B0: tl.constexpr, B1: tl.constexpr, HAS_GATE: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
+):
+    # As _attn_fwd_kernel, with q/k/v/bias tiles fetched by TMA and the key
+    # loop software-pipelined: the TMA box zero-fills past the tensor edges,
+    # so the D padding and the last key block need no masked loads. The
+    # kernel is latency-bound (one row of the softmax per thread); the
+    # pipelined loads take about 30% off the plain kernel on GB300. With
+    # HAS_GATE the output is multiplied by sigmoid(G) (the attention module's
+    # output gate) before it is stored.
+    pid_m = tl.program_id(0)
+    pid_z = tl.program_id(1)
+    z0 = pid_z // H
+    z1 = pid_z % H
+    m0 = pid_m * BLOCK_M
+    q = q_desc.load([z0, z1, m0, 0]).reshape(BLOCK_M, BLOCK_D) * 1.4426950408889634
+    bz0 = z0 if B0 else 0
+    bz1 = z1 if B1 else 0
+    m_i = tl.full((BLOCK_M,), float("-inf"), tl.float32)
+    l_i = tl.zeros((BLOCK_M,), tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_D), tl.float32)
+    offs_n = tl.arange(0, BLOCK_N)
+    for start in tl.range(0, N, BLOCK_N, num_stages=3):
+        k = k_desc.load([z0, z1, start, 0]).reshape(BLOCK_N, BLOCK_D)
+        s = tl.dot(q, k.T, input_precision="tf32")
+        s += b_desc.load([bz0, bz1, m0, start]).reshape(BLOCK_M, BLOCK_N) * 1.4426950408889634
+        s = tl.where((start + offs_n < N)[None, :], s, float("-inf"))
+        m_new = tl.maximum(m_i, tl.max(s, 1))
+        p = tl.exp2(s - m_new[:, None])
+        alpha = tl.exp2(m_i - m_new)
+        l_i = l_i * alpha + tl.sum(p, 1)
+        v = v_desc.load([z0, z1, start, 0]).reshape(BLOCK_N, BLOCK_D)
+        acc = acc * alpha[:, None] + tl.dot(p, v, input_precision="tf32")
+        m_i = m_new
+    o = acc / l_i[:, None]
+    offs_m = m0 + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_D)
+    mask = (offs_m < M)[:, None] & (offs_d < D)[None, :]
+    if HAS_GATE:
+        g = tl.load(G + z0.to(tl.int64) * sg0 + z1 * sg1 + offs_m[:, None] * sgm + offs_d[None, :], mask=mask, other=0.0)
+        o = o * tl.sigmoid(g)
+    tl.store(O + z0.to(tl.int64) * so0 + z1 * so1 + offs_m[:, None] * som + offs_d[None, :], o, mask=mask)
+
+
+_TMA_BLOCK_M, _TMA_BLOCK_N = 128, 32
+
+
+def _tma_ok(t: torch.Tensor) -> bool:
+    # TMA: 16-byte aligned base and strides, unit stride last, no broadcast dims
+    return (
+        t.data_ptr() % 16 == 0
+        and t.stride(-1) == 1
+        and all(s % 4 == 0 and s > 0 for s in t.stride()[:-1])
+    )
+
+
+def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None) -> Optional[torch.Tensor]:
+    """The TMA kernel when the layout allows it (Blackwell, d <= 64, a bias
+    whose leading dims are 1 or match), else None. gate/out: optional
+    [*lead, m, d] views (any strides, unit last) for the output gate and the
+    output."""
+    if torch.cuda.get_device_capability(q4.device)[0] < 10 or d > 64 or b is None:
+        return None
+    b4 = _as_4d(b)
+    if b4.shape[-2:] != (m, n) or any(bs not in (1, ls) for bs, ls in zip(b4.shape[:2], lead)):
+        return None
+    if q4.shape[:2] != lead or k4.shape[:2] != lead or v4.shape[:2] != lead:
+        return None
+    if not all(_tma_ok(t) for t in (q4, k4, v4, b4)):
+        return None
+    from triton.tools.tensor_descriptor import TensorDescriptor
+
+    bm, bn, bd = _TMA_BLOCK_M, _TMA_BLOCK_N, 64
+    o = torch.empty((*lead, m, d), device=q4.device, dtype=q4.dtype) if out is None else out
+    g = o if gate is None else gate
+    _attn_fwd_tma_kernel[(triton.cdiv(m, bm), lead[0] * lead[1])](
+        TensorDescriptor.from_tensor(q4, [1, 1, bm, bd]),
+        TensorDescriptor.from_tensor(k4, [1, 1, bn, bd]),
+        TensorDescriptor.from_tensor(v4, [1, 1, bn, bd]),
+        TensorDescriptor.from_tensor(b4, [1, 1, bm, bn]),
+        o, o.stride(0), o.stride(1), o.stride(2),
+        g, g.stride(0), g.stride(1), g.stride(2),
+        lead[1], m, n,
+        D=d, B0=b4.shape[0] != 1, B1=b4.shape[1] != 1, HAS_GATE=gate is not None,
+        BLOCK_M=bm, BLOCK_N=bn, BLOCK_D=bd,
+        num_warps=4,
+    )
+    return o
+
+
+def gated_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, gate: torch.Tensor, out: torch.Tensor
+) -> bool:
+    """out = softmax(q k^T + bias) v * sigmoid(gate), all [S, H, M, D] views
+    (bias [1 or S, 1 or H, M, N]), in one TMA kernel. Returns False (nothing
+    written) where that kernel does not apply."""
+    if not (_ENABLED and _TMA and tf32_attention_ok(q, k, v, bias) and q.dim() == 4):
+        return False
+    s_, h, m, d = q.shape
+    if k.shape[:2] != (s_, h) or gate.shape != q.shape or out.shape != q.shape:
+        return False
+    if gate.stride(-1) != 1 or out.stride(-1) != 1:
+        return False
+    return _tma_attention(q, k, v, bias, (s_, h), m, k.shape[-2], d, gate=gate, out=out) is not None
+
+
 def _as_4d(x: torch.Tensor) -> torch.Tensor:
     while x.dim() < 4:
         x = x.unsqueeze(0)
@@ -122,6 +234,10 @@ def tf32_attention(
     q4, k4, v4 = (t.expand(*lead, *t.shape[2:]) for t in (q4, k4, v4))
     m, d = q4.shape[-2:]
     n = k4.shape[-2]
+    if _TMA:
+        o = _tma_attention(q4, k4, v4, bias, lead, m, n, d)
+        if o is not None:
+            return o.view(out_shape)
     o = torch.empty((*lead, m, d), device=q.device, dtype=q.dtype)
     if bias is not None:
         b4 = _as_4d(bias).expand(*lead, m, n)
