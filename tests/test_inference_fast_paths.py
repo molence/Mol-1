@@ -132,11 +132,23 @@ class TriangleFastPathTest(unittest.TestCase):
                 torch.testing.assert_close(out.float()[keep], ref.float()[keep], atol=2e-2, rtol=2e-2)
 
     def test_fast_trimul_matches_cuequivariance(self):
+        self._fast_trimul(torch.bfloat16, atol=5e-2, rtol=2e-2)
+
+    def test_fast_trimul_fp32_matches_cuequivariance(self):
+        # strict FP32 on both sides (the module takes this path in FP32 only with TF32)
+        old = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        try:
+            self._fast_trimul(torch.float32, atol=1e-4, rtol=1e-4)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = old
+
+    def _fast_trimul(self, dt, atol, rtol):
         from cuequivariance_torch.primitives.triangle import triangle_multiplicative_update
 
         from mol.model.triangular.fast_trimul import triangle_multiplicative_update as fast
 
-        n, c, dt = 64, 64, torch.bfloat16
+        n, c = 64, 64
         torch.manual_seed(0)
         x = torch.randn(n, n, c, device="cuda", dtype=dt)
         res = torch.randn_like(x)
@@ -159,7 +171,7 @@ class TriangleFastPathTest(unittest.TestCase):
                 out = fast(x, direction, mask, niw, nib, w_in, now, nob,
                            p_out, g_out, 1e-5, residual=res, in_weight_interleaved=w_il).float()
             keep = mask.bool()
-            torch.testing.assert_close(out[keep], (ref + res.float())[keep], atol=5e-2, rtol=2e-2)
+            torch.testing.assert_close(out[keep], (ref + res.float())[keep], atol=atol, rtol=rtol)
 
     def test_pairformer_stack_padding_is_transparent(self):
         """Padding the pair tensor to a multiple of 8 leaves real tokens unchanged."""
@@ -317,17 +329,18 @@ class GraphedDenoiseStepTest(unittest.TestCase):
 
 @unittest.skipUnless(CUDA, "needs CUDA")
 class FusedDiffusionTransformerTest(unittest.TestCase):
-    def _compare(self, n, local, tf32):
+    def _compare(self, n, local, tf32, s_shape=None, cross=False):
         import mol.model.modules.diffusion_fast as dfast
         from mol.model.modules.transformer import DiffusionTransformer
 
         torch.manual_seed(0)
-        dt = DiffusionTransformer(c_a=64, c_s=32, c_z=16, n_blocks=3, n_heads=4).cuda().eval()
+        dt = DiffusionTransformer(c_a=64, c_s=32, c_z=16, n_blocks=3, n_heads=4, cross_attention_mode=cross).cuda().eval()
         with torch.no_grad():
             for p in dt.parameters():  # the zero-initialized gates and outputs too
                 p.copy_(torch.randn_like(p) * 0.2 + (1.0 if p.dim() == 1 and "weight" in str(p.shape) else 0.0))
         a = torch.randn(3, n, 64, device="cuda")
-        s = torch.randn(3, n, 32, device="cuda")
+        s = torch.randn(*(s_shape or (3,)), n, 32, device="cuda")
+        a0 = a.clone()
         kwargs = {}
         if local:
             z = torch.randn(1, (n + 31) // 32, 32, 128, 16, device="cuda")
@@ -349,6 +362,7 @@ class FusedDiffusionTransformerTest(unittest.TestCase):
                     dfast._ENABLED = True
         finally:
             torch.backends.cuda.matmul.allow_tf32 = old
+        torch.testing.assert_close(a, a0, rtol=0, atol=0)  # the input is not updated in place
         tol = 2e-2 if tf32 else 1e-4
         torch.testing.assert_close(out, ref, atol=tol * ref.abs().max().item(), rtol=tol)
 
@@ -364,6 +378,20 @@ class FusedDiffusionTransformerTest(unittest.TestCase):
         for tf32 in (True, False):
             with self.subTest(tf32=tf32):
                 self._compare(200, local=True, tf32=tf32)
+
+    def test_shared_conditioning(self):
+        # s shared by the samples, as in the atom transformers
+        for s_shape in ((), (1,)):
+            for local in (True, False):
+                with self.subTest(s_shape=s_shape, local=local):
+                    self._compare(160, local=local, tf32=True, s_shape=s_shape)
+
+    def test_cross_attention_mode(self):
+        # the atom transformers: keys/values from their own AdaLN, s shared
+        for local in (True, False):
+            for tf32 in (True, False):
+                with self.subTest(local=local, tf32=tf32):
+                    self._compare(160, local=local, tf32=tf32, s_shape=(1,), cross=True)
 
 
 if __name__ == "__main__":

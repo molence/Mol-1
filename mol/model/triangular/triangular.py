@@ -240,7 +240,12 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
             _FAST_TRIMUL
             and z.is_cuda
             and z.dim() == 3
-            and z.dtype in (torch.bfloat16, torch.float16)
+            # FP32 (the confidence head) with TF32: 1.8x faster than
+            # cuEquivariance's FP32 gated GEMMs; in strict FP32 slightly slower.
+            and (
+                z.dtype in (torch.bfloat16, torch.float16)
+                or (z.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32)
+            )
             and not torch.is_grad_enabled()
             and z.shape[-2] > 16
         )
