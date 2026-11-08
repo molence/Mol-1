@@ -10,9 +10,9 @@ first prediction.
 | Configuration | Trunk | Diffusion | Confidence | Forward |
 | --- | --- | --- | --- | --- |
 | Before, defaults | 26.0 s | 31.8 s | 3.5 s | 61.3 s |
-| Now, defaults | 9.1 s | 14.7 s | 2.9 s | 26.8 s |
+| Now, defaults | 9.1 s | 12.7 s | 2.9 s | 24.8 s |
 | Before, `--enable_tf32 true --infer_setting.sample_diffusion_chunk_size 5` | 25.9 s | 6.5 s | 1.45 s | 34.0 s |
-| Now, same flags | 9.0 s | 2.1 s | 0.91 s | 12.1 s |
+| Now, same flags | 9.0 s | 1.63 s | 0.70 s | 11.4 s |
 | Now, same flags plus `--bf16_confidence_head true` | 9.1 s | 2.1 s | 0.24 s | 11.4 s |
 
 Other inputs, one `mol pred` process per input file, same flags as the
@@ -31,7 +31,8 @@ the Triton kernels, about 2.5 s more).
 | 8h0q | 1,499 | 241.4 s | 78.7 s | 58.4 / 59.3 GiB |
 
 The fused paths keep larger temporaries alive inside a module, so peak memory
-rises by up to a few GiB. Ranking scores agreed within the spread of repeated runs of the
+rises by up to a few GiB (on 9fm7, 0.8 GiB of it is the fused diffusion
+weights, kept for the life of the model). Ranking scores agreed within the spread of repeated runs of the
 old code, which is large on the FoldBench inputs without MSAs (8cnh: 0.29 to
 0.66 across three runs of the old code; 8h0q: 0.69 to 0.77).
 
@@ -83,6 +84,8 @@ variable listed, for comparison or if one misbehaves.
 | Within it, the up-projections and SwiGLU as one persistent, warp-specialized Triton GEMM (Blackwell, BF16): the [N^2, 8C] intermediate never reaches memory (1.8-2.0x) | `triton_swiglu.py` | `MOL_SWIGLU_MATMUL=0` |
 | Outer product mean: the [N, C, N, C] -> [N, N, C, C] permute at memory bandwidth (4x PyTorch's strided copy) | `triton_permute.py` | — |
 | With TF32 enabled: FP32 attention (diffusion token transformer, confidence head) as a TF32 flash-attention Triton kernel (2.9x SDPA's FP32 kernel), and the atom transformer's windowed attention read in place instead of materializing padded key windows | `triton_attention.py`, `primitives.py` | `MOL_TF32_ATTENTION=0` |
+| Within it, on Blackwell: q/k/v/bias tiles loaded by TMA with the key loop pipelined (95 -> 67 us per call at the diffusion shape), the attention module's sigmoid gate in the epilogue, and an optional key mask; the confidence head's FP32 triangle attention uses it too (1.6 vs 3.0 ms per call for cuEquivariance's FP32 kernel) | `triton_attention.py`, `triangular.py` | `MOL_TMA_ATTENTION=0` |
+| Diffusion transformer blocks: the s-side projections of all blocks (both adaptive LayerNorms, both output gates) as one LayerNorm and two wide GEMMs per group of blocks, AdaLN of the activations as one Triton kernel, q/k/v/g as one GEMM, residual gates as `addcmul`: about 45 kernels per block become 11 (diffusion 2.08 -> 1.63 s with TF32, 14.7 -> 12.7 s in full FP32) | `diffusion_fast.py`, `transformer.py` | `MOL_FUSED_DIFFUSION_BLOCKS=0` |
 | Pair bias: LayerNorm + head projection + transpose in one pass | `pair_bias.py` | `MOL_FUSED_PAIR_BIAS=0` |
 | Diffusion: each denoising step is replayed from a CUDA Graph | `cuda_graph.py` | `MOL_DIFFUSION_CUDA_GRAPH=0` |
 | Fast LayerNorm extension launches on PyTorch's current stream (it used the legacy default stream, which escaped graph capture) | `layer_norm_cuda_kernel.cu` | — |
@@ -134,7 +137,7 @@ time per call from nsys, `--enable_tf32 true`:
 | Pairformer transition, C=320 (800) | 0.50 ms (GEMM) | 1.36 ms | 0.84 ms | 1.7x |
 | PairMixer triangle multiplication, C=448 (320) | 0.61 ms | 1.86 ms | 1.58 ms | 2.6x |
 | PairMixer transition, C=448 (160) | 0.99 ms | 2.07 ms | 1.44 ms | 1.5x |
-| Diffusion token transformer, per step (200) | 1.45 ms (TF32) | about 10 ms | 7.5 ms | 5x |
+| Diffusion stage, per step (200) | 1.45 ms (TF32, token transformer) | about 10 ms | 8.2 ms (whole stage, wall) | |
 
 Kernel time on 9fm7 is now 11.9 s: Pairformer stack 7.0 s, diffusion 1.9 s,
 MSA module 1.8 s, confidence head 0.9 s, template embedder 0.3 s. Remaining
@@ -153,12 +156,28 @@ gaps, largest first:
   gating into a dual-input GEMM was tried: with Triton 3.8 the
   warp-specialized form fails to compile with two accumulators, and without
   warp specialization it is slower than cuBLAS.
-- Diffusion: about 1,290 kernels per step for a few GFLOP each; the token
-  attention kernel (98 us per call vs about 10 us) is latency-bound in
-  Triton's TF32 flash attention, and LayerNorm, adaptive-LayerNorm gating
-  and residual adds are separate elementwise kernels (about 0.6 s in all).
+- Diffusion: now about 660 kernels per step (was 1,290) after fusing the
+  transformer blocks; the token attention kernel (67-74 us per call vs
+  about 10 us) is latency-bound in Triton's TF32 flash attention and is the
+  largest single item (about 0.35 s).
 
-Tried and dropped: cuEquivariance gated-GEMM tile configs beyond its tuning
+Kernel work that did not pay off (second round):
+
+- Triton attention for the diffusion shape plateaus at 64-68 us per call
+  (SOL about 10 us): TMA loads, ping-pong subtiles with warp specialization
+  and register-resident mma.sync all land there. ncu shows it latency-bound
+  (one softmax row per thread, about 10% occupancy, long-scoreboard and
+  barrier stalls). Going further needs a hand-written CuTe kernel.
+- Triangle multiplication output side (LayerNorm of the einsum, output
+  projection, gating, residual) as one Triton GEMM, with the LayerNorm
+  applied in registers (613 vs 360 us) or folded into the GEMM epilogue via
+  per-position statistics (418-438 us): the separate kernels are already
+  near their bandwidth bound (about 310 us); with g and the residual still
+  read, the fused floor is about 200 us.
+- flash_attn_4 for triangle attention: the container lacks its CuTe DSL
+  dependency, and its bias would be a per-element gather in `score_mod`.
+
+Tried and dropped earlier: cuEquivariance gated-GEMM tile configs beyond its tuning
 space (no gain), torch.compile'd SwiGLU (slower than the Triton kernel),
 row chunks under 256k rows in the transition (slower), non-persistent
 Triton GEMMs for the SwiGLU and gating fusions (slower than cuBLAS plus a
