@@ -50,6 +50,32 @@ _FUSED_TRI_ATT = os.getenv("MOL_FUSED_TRI_ATT", "1") != "0"
 _FAST_TRIMUL = os.getenv("MOL_FAST_TRIMUL", "1") != "0"
 
 
+def _key_prefix(mask: torch.Tensor, ending: bool) -> Optional[int]:
+    """For a pair mask [I, J] of the form row_valid[i] * col_valid[j] whose
+    valid keys are a prefix (padding), the number of valid keys; else None.
+    Keys are j for starting-node attention, i for ending-node attention.
+
+    Computed once per mask tensor (one host sync) and kept on the tensor, so
+    the blocks of a stack, which share the mask, reuse it. Rows that are
+    entirely masked (padding) then attend over the valid keys instead of
+    uniformly over all keys; they are padding either way.
+    """
+    cached = getattr(mask, "_mol_key_prefix", None)
+    if cached is None or cached[0] != mask._version:
+        m = mask != 0
+        rows, cols = m.any(1), m.any(0)
+        separable = (m == (rows[:, None] & cols[None, :])).all()
+        stats = []
+        for keys in (cols, rows):
+            n = keys.sum()
+            prefix = (keys == (torch.arange(keys.numel(), device=m.device) < n)).all()
+            stats += [(separable & prefix).int(), n.int()]
+        ok_c, n_c, ok_r, n_r = torch.stack(stats).tolist()
+        cached = (mask._version, (n_c if ok_c and n_c > 0 else None, n_r if ok_r and n_r > 0 else None))
+        mask._mol_key_prefix = cached
+    return cached[1][1 if ending else 0]
+
+
 def _tri_pad_amount(x: torch.Tensor) -> int:
     """Rows/columns to append to a square [*, N, N, C] pair tensor, or 0."""
     if (
@@ -796,6 +822,20 @@ class TriangleAttention(nn.Module):
                 bias = bias.contiguous()
             key_mask = (mask.t() if ending else mask) != 0
             o = None
+            if dtype == torch.bfloat16 and mask.dim() == 2:
+                # Blackwell: CUTLASS FMHA with the bias on the tensor cores
+                # and the gate in the epilogue (tri_fmha), for padding masks.
+                from mol.model.triangular import tri_fmha
+
+                gate = g.view(n_i, n_j, h, d).permute(perm)
+                o = torch.empty((n_i, n_j, h, d), device=x.device, dtype=dtype)
+                n_keys = _key_prefix(mask, ending) if tri_fmha.supported(q, k, gate, o) else None
+                if n_keys is not None and tri_fmha.attention(
+                    q, k, v, bias[0], gate, o.permute(perm), n_keys, 1.0 / math.sqrt(d)
+                ):
+                    o = o.view(n_i, n_j, hd)
+                else:
+                    o = None
             if dtype == torch.float32:
                 # FP32 (the confidence head) with TF32 enabled: the TF32 TMA
                 # attention kernel with the gate fused; cuEquivariance's FP32

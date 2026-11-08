@@ -63,6 +63,18 @@ The fused triangle kernels come from NVIDIA's `cuequivariance` packages,
 installed through the `cuda` or `cuda12` extra and not vendored here. They are optional:
 `triangle_* = auto` resolves to the PyTorch path when they are absent.
 
+## CUTLASS
+
+`mol/model/triangular/tri_fmha/csrc/{collective,kernel,device}/` are copied
+from NVIDIA CUTLASS 4.6 (`examples/77_blackwell_fmha`), Copyright (c) 2024 -
+2026 NVIDIA CORPORATION & AFFILIATES, under the BSD-3-Clause license whose text
+each file keeps in its header. Three of them were modified for Mol-1's
+triangle attention (pair bias on the tensor cores, output gate in the
+epilogue); each says so below its license. The CUTLASS library headers they
+include are not vendored: the kernel is compiled at first use against a
+CUTLASS checkout (`MOL_CUTLASS_DIR`, or the one in NVIDIA's PyTorch
+containers) and is skipped when none is found.
+
 ## Data and models
 
 No structural data or MSA databases are distributed from this repository. The

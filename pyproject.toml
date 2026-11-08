@@ -124,6 +124,8 @@ exclude = ["assets*", "docs*", "examples*", "scripts*", "tests*", "plans*"]
 mol = [
   "model/layer_norm/kernel/*",
   "model/triangular/cueq_tuning/*.json",
+  "model/triangular/tri_fmha/csrc/*.cu",
+  "model/triangular/tri_fmha/csrc/*/*.hpp",
 ]
 
 [tool.setuptools.dynamic]
