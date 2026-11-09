@@ -823,15 +823,17 @@ class TriangleAttention(nn.Module):
             key_mask = (mask.t() if ending else mask) != 0
             o = None
             if dtype == torch.bfloat16 and mask.dim() == 2:
-                # Blackwell: CUTLASS FMHA with the bias on the tensor cores
-                # and the gate in the epilogue (tri_fmha), for padding masks.
-                from mol.model.triangular import tri_fmha
+                # Blackwell, padding masks: FlashAttention-4 (tri_fa4) or else
+                # CUTLASS FMHA (tri_fmha), both with the bias on the tensor
+                # cores and the gate in the epilogue.
+                from mol.model.triangular import tri_fa4, tri_fmha
 
                 gate = g.view(n_i, n_j, h, d).permute(perm)
                 o = torch.empty((n_i, n_j, h, d), device=x.device, dtype=dtype)
-                n_keys = _key_prefix(mask, ending) if tri_fmha.supported(q, k, gate, o) else None
-                if n_keys is not None and tri_fmha.attention(
-                    q, k, v, bias[0], gate, o.permute(perm), n_keys, 1.0 / math.sqrt(d)
+                kernels = [m for m in (tri_fa4, tri_fmha) if m.supported(q, k, gate, o)]
+                n_keys = _key_prefix(mask, ending) if kernels else None
+                if n_keys is not None and any(
+                    m.attention(q, k, v, bias[0], gate, o.permute(perm), n_keys, 1.0 / math.sqrt(d)) for m in kernels
                 ):
                     o = o.view(n_i, n_j, hd)
                 else:

@@ -113,19 +113,17 @@ class TriangleFastPathTest(unittest.TestCase):
             torch.backends.cuda.matmul.allow_tf32 = old
         self.assertTrue(used and all(used))
 
-    def test_triangle_attention_bf16_tri_fmha(self):
-        """BF16 on Blackwell: the CUTLASS kernel with the bias on the tensor
-        cores and the gate fused (tri_fmha), both directions, against the
-        cuEquivariance path; a mask that is not padding falls back."""
-        import mol.model.triangular.tri_fmha as tf
+    def _check_tri_kernel(self, kernel, other):
+        """BF16 on Blackwell: `kernel` (bias on the tensor cores, gate fused),
+        both directions, against the cuEquivariance path, with `other`
+        disabled; a mask that is not padding falls back."""
         import mol.model.triangular.triangular as tri
 
-        if torch.cuda.get_device_capability()[0] != 10 or tf._cutlass_dir() is None:
-            self.skipTest("needs Blackwell and CUTLASS headers")
         n = 136
         used = []
-        orig = tf.attention
-        tf.attention = lambda *a, **k: used.append(orig(*a, **k)) or used[-1]
+        orig = kernel.attention
+        kernel.attention = lambda *a, **k: used.append(orig(*a, **k)) or used[-1]
+        other._ENABLED = False
         try:
             for starting in (True, False):
                 mod = _init(tri.TriangleAttention(c_in=64, c_hidden=32, no_heads=4, starting=starting))
@@ -133,11 +131,11 @@ class TriangleFastPathTest(unittest.TestCase):
                 mask = self._mask(n, z.dtype)
                 call = lambda: mod(z, mask=mask, chunk_size=1024, triangle_attention="cuequivariance")
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-                    tf._ENABLED = False
+                    kernel._ENABLED = False
                     try:
                         ref = call().float()
                     finally:
-                        tf._ENABLED = True
+                        kernel._ENABLED = True
                     out = call().float()
                 keep = mask.bool()
                 torch.testing.assert_close(out[keep], ref[keep], atol=2e-2, rtol=2e-2)
@@ -148,7 +146,24 @@ class TriangleFastPathTest(unittest.TestCase):
                 mod(z, mask=mask, chunk_size=1024, triangle_attention="cuequivariance")
             self.assertFalse(used)
         finally:
-            tf.attention = orig
+            kernel.attention = orig
+            other._ENABLED = True
+
+    def test_triangle_attention_bf16_tri_fmha(self):
+        import mol.model.triangular.tri_fa4 as fa4
+        import mol.model.triangular.tri_fmha as tf
+
+        if torch.cuda.get_device_capability()[0] != 10 or tf._cutlass_dir() is None:
+            self.skipTest("needs Blackwell and CUTLASS headers")
+        self._check_tri_kernel(tf, fa4)
+
+    def test_triangle_attention_bf16_tri_fa4(self):
+        import mol.model.triangular.tri_fa4 as fa4
+        import mol.model.triangular.tri_fmha as tf
+
+        if torch.cuda.get_device_capability()[0] != 10 or not fa4._load():
+            self.skipTest("needs Blackwell and the CuTe DSL with flash-attn-4")
+        self._check_tri_kernel(fa4, tf)
 
     def test_key_prefix(self):
         import mol.model.triangular.triangular as tri
