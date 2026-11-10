@@ -90,15 +90,17 @@ def adaln(
     eps: float,
     res: Optional[tuple] = None,
     a_out: Optional[torch.Tensor] = None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> Optional[torch.Tensor]:
     """LayerNorm(a) (no affine) * sigmoid(gate) + shift for [rows, C] inputs
     (row strides free). res = (og, r): first a_out = a + sigmoid(og) * r
     (a_out may be a itself), and the LayerNorm is of a_out. gate None: only
     the residual update, returns None. gate/shift/og may have fewer rows than
-    a (a divisor of them): they repeat over a's rows."""
+    a (a divisor of them): they repeat over a's rows. out_dtype: of the
+    result (default a's); r may be FP16."""
     rows, c = a.shape
     has_ln = gate is not None
-    y = torch.empty((rows, c), device=a.device, dtype=a.dtype) if has_ln else a
+    y = torch.empty((rows, c), device=a.device, dtype=out_dtype or a.dtype) if has_ln else a
     og, r = res if res is not None else (a, a)
     ao = a if a_out is None else a_out
     g = gate if has_ln else a
@@ -139,7 +141,7 @@ def fused_ok(dt, a: torch.Tensor, s: torch.Tensor) -> bool:
 
 
 class _BlockWeights:
-    __slots__ = ("w_qkvg", "b_qkvg", "w_o", "w_12", "w_b", "cross")
+    __slots__ = ("w_qkvg", "b_qkvg", "w_o", "w_12", "w_b", "cross", "fp16")
 
 
 def _fused_weights(dt):
@@ -167,6 +169,7 @@ def _fused_weights(dt):
         ).contiguous()
         bw.b_qkvg = torch.cat([q_bias * scale, q_bias.new_zeros(3 * hd)])
         bw.cross = apb.cross_attention_mode
+        bw.fp16 = None  # (w_qkvg, b_qkvg, w_o) in FP16 for the FA4 attention, made on first use
         bw.w_o = att.linear_o.weight
         bw.w_12 = torch.cat([ctb.linear_nobias_a1.weight, ctb.linear_nobias_a2.weight], 0).contiguous()
         bw.w_b = ctb.linear_nobias_b.weight
@@ -191,6 +194,36 @@ def _fused_weights(dt):
     out = (blocks, torch.cat(w_ln, 0), torch.cat(b_ln), torch.cat(w_raw, 0), torch.cat(b_raw))
     dt._fused_cache = (key, out)
     return out
+
+
+def _fa4_attention(blk, x16, rows_shape, z, pair_bias, enable_efficient_fusion, bw):
+    """_attention on FlashAttention-4 (fa4_attention.py): x16 is FP16, the
+    q/k/v/g projection, attention and output projection run in FP16 with FP32
+    accumulation; returns [rows, c_a] FP16, or None where the kernel does not
+    apply."""
+    from mol.model.modules import fa4_attention
+
+    apb = blk.attention_pair_bias
+    att = apb.attention
+    s_, n = rows_shape
+    h, d = att.num_heads, att.c_hidden
+    if bw.fp16 is None:
+        bw.fp16 = tuple(t.to(torch.float16).contiguous() for t in (bw.w_qkvg, bw.b_qkvg, bw.w_o))
+    w_qkvg, b_qkvg, w_o = bw.fp16
+    if pair_bias is not None:
+        bias = pair_bias
+    elif enable_efficient_fusion:
+        bias = apb._project_pair_bias_from_normalized(z)
+    else:
+        bias = apb.project_pair_bias(z)
+    if bias.shape[-3:] != (h, n, n) or bias.numel() != h * n * n:
+        return None
+    qgkv = torch.addmm(b_qkvg, x16, w_qkvg.t()).view(s_, n, 4, h, d)
+    q, g, k, v = (qgkv[:, :, i] for i in range(4))  # [S, N, H, D] views
+    out = torch.empty((s_, n, h, d), device=x16.device, dtype=torch.float16)
+    if not fa4_attention.attention(q, k, v, fa4_attention.fp16_bias(bias), g, out):
+        return None
+    return out.view(s_ * n, h * d) @ w_o.t()
 
 
 def _attention(blk, x, x_kv, rows_shape, z, n_queries, n_keys, pair_bias, chunk_size, enable_efficient_fusion, bw):
@@ -251,10 +284,18 @@ def fused_forward(
     chunk_size: Optional[int],
     enable_efficient_fusion: bool = False,
 ) -> torch.Tensor:
+    from mol.model.modules import fa4_attention
     from mol.model.modules.triton_swiglu import silu_mul
 
     blocks, w_ln, b_ln, w_raw, b_raw = _fused_weights(dt)
     s_, n, c_a = a.shape
+    att0 = dt.blocks[0].attention_pair_bias.attention
+    # FP16 FlashAttention-4 for the global attention (the token transformer)
+    fa4 = (
+        not blocks[0].cross
+        and not (n_queries and n_keys)
+        and fa4_attention.available(a, att0.num_heads, att0.c_hidden)
+    )
     c_s = s.shape[-1]
     rows = s_ * n
     x_eps = dt.blocks[0].attention_pair_bias.layernorm_a.layernorm_a.eps
@@ -267,12 +308,12 @@ def fused_forward(
     res = None  # the pending gated residual (gate logits, update), applied by the next adaln
     owned = False  # a2 is ours to update in place (a is the caller's)
 
-    def norm(gate, shift):
+    def norm(gate, shift, out_dtype=None):
         nonlocal a2, owned
         a_out = None
         if res is not None and not owned:
             a_out = torch.empty((rows, c_a), device=a.device, dtype=a.dtype)
-        y = adaln(a2, gate, shift, x_eps, res, a_out)
+        y = adaln(a2, gate, shift, x_eps, res, a_out, out_dtype)
         if a_out is not None:
             a2, owned = a_out, True
         return y
@@ -293,14 +334,22 @@ def fused_forward(
         out_gates = torch.addmm(b_raw[sl], s2, w_raw[sl].t()).view(s_rows, nb, 2, c_a)
         for j, i in enumerate(idx):
             blk, bw = dt.blocks[i], blocks[i]
-            x = norm(cond[:, j, 0], cond[:, j, sh])
-            # as AttentionPairBias: x_kv is the kv AdaLN of x (not of a)
-            x_kv = adaln(x, cond[:, j, 2], cond[:, j, sh + 2], x_eps) if cross else None
-            y = _attention(
-                blk, x, x_kv, (s_, n), z, n_queries, n_keys,
-                None if pair_biases is None else pair_biases.blocks[i], chunk_size,
-                enable_efficient_fusion, bw,
-            )
+            pair_bias = None if pair_biases is None else pair_biases.blocks[i]
+            y = None
+            if fa4:
+                x = norm(cond[:, j, 0], cond[:, j, sh], torch.float16)
+                y = _fa4_attention(blk, x, (s_, n), z, pair_bias, enable_efficient_fusion, bw)
+                if y is None:
+                    x = x.float()
+            else:
+                x = norm(cond[:, j, 0], cond[:, j, sh])
+            if y is None:
+                # as AttentionPairBias: x_kv is the kv AdaLN of x (not of a)
+                x_kv = adaln(x, cond[:, j, 2], cond[:, j, sh + 2], x_eps) if cross else None
+                y = _attention(
+                    blk, x, x_kv, (s_, n), z, n_queries, n_keys, pair_bias, chunk_size,
+                    enable_efficient_fusion, bw,
+                )
             res = (out_gates[:, j, 0], y)
             x = norm(cond[:, j, 1], cond[:, j, sh + 1])
             y = silu_mul(x @ bw.w_12.t()) @ bw.w_b.t()

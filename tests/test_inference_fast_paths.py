@@ -395,16 +395,16 @@ class GraphedDenoiseStepTest(unittest.TestCase):
 
 @unittest.skipUnless(CUDA, "needs CUDA")
 class FusedDiffusionTransformerTest(unittest.TestCase):
-    def _compare(self, n, local, tf32, s_shape=None, cross=False):
+    def _compare(self, n, local, tf32, s_shape=None, cross=False, c_a=64):
         import mol.model.modules.diffusion_fast as dfast
         from mol.model.modules.transformer import DiffusionTransformer
 
         torch.manual_seed(0)
-        dt = DiffusionTransformer(c_a=64, c_s=32, c_z=16, n_blocks=3, n_heads=4, cross_attention_mode=cross).cuda().eval()
+        dt = DiffusionTransformer(c_a=c_a, c_s=32, c_z=16, n_blocks=3, n_heads=4, cross_attention_mode=cross).cuda().eval()
         with torch.no_grad():
             for p in dt.parameters():  # the zero-initialized gates and outputs too
                 p.copy_(torch.randn_like(p) * 0.2 + (1.0 if p.dim() == 1 and "weight" in str(p.shape) else 0.0))
-        a = torch.randn(3, n, 64, device="cuda")
+        a = torch.randn(3, n, c_a, device="cuda")
         s = torch.randn(*(s_shape or (3,)), n, 32, device="cuda")
         a0 = a.clone()
         kwargs = {}
@@ -439,6 +439,34 @@ class FusedDiffusionTransformerTest(unittest.TestCase):
             for tf32 in (True, False):
                 with self.subTest(n=n, tf32=tf32):
                     self._compare(n, local=False, tf32=tf32)
+
+    def test_global_attention_fa4(self):
+        """With TF32: the token attention in FP16 on FlashAttention-4 (bias
+        and gate fused); head dims 16 and 48, 150 tokens (keys padded for
+        TMA and masked), against the unfused FP32 blocks and the Triton
+        kernel."""
+        import mol.model.modules.fa4_attention as fa
+
+        if torch.cuda.get_device_capability()[0] != 10 or fa._kernel(48) is None:
+            self.skipTest("needs Blackwell and the CuTe DSL with flash-attn-4")
+        used = []
+        orig = fa.attention
+        fa.attention = lambda *a, **k: used.append(orig(*a, **k)) or used[-1]
+        try:
+            for n in (160, 150):
+                for c_a in (64, 192):
+                    with self.subTest(n=n, c_a=c_a):
+                        self._compare(n, local=False, tf32=True, c_a=c_a)
+                        self.assertTrue(used and all(used))
+                        used.clear()
+                        fa._ENABLED = False
+                        try:
+                            self._compare(n, local=False, tf32=True, c_a=c_a)
+                        finally:
+                            fa._ENABLED = True
+                        self.assertFalse(used)
+        finally:
+            fa.attention = orig
 
     def test_local_attention(self):
         for tf32 in (True, False):

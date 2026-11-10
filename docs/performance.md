@@ -15,6 +15,10 @@ first prediction.
 | Now, same flags | 8.6 s | 1.39 s | 0.55 s | 10.6 s |
 | Now, same flags, FA4 triangle attention installed (below) | 8.1 s | 1.39 s | 0.55 s | 10.2 s |
 | Now, same flags plus `--bf16_confidence_head true` | 8.6 s | 1.38 s | 0.23 s | 10.3 s |
+| Now, same flags, FA4 triangle and token attention (below) | 8.2 s | 1.11 s | 0.55 s | 9.9 s |
+
+The last row was measured on a shared node against 10.25 s (diffusion 1.40 s)
+for the same code with `MOL_FA4_ATTENTION=0` in the same session.
 
 Other inputs, one `mol pred` process per input file, same flags as the
 second pair of rows (`--use_msa false` for the FoldBench inputs). The first
@@ -88,6 +92,7 @@ variable listed, for comparison or if one misbehaves.
 | Outer product mean: the [N, C, N, C] -> [N, N, C, C] permute at memory bandwidth (4x PyTorch's strided copy) | `triton_permute.py` | — |
 | With TF32 enabled: FP32 attention (diffusion token transformer, confidence head) as a TF32 flash-attention Triton kernel (2.9x SDPA's FP32 kernel), and the atom transformer's windowed attention read in place instead of materializing padded key windows | `triton_attention.py`, `primitives.py` | `MOL_TF32_ATTENTION=0` |
 | Within it, on Blackwell: q/k/v/bias tiles loaded by TMA with the key loop pipelined (95 -> 67 us per call at the diffusion shape), the attention module's sigmoid gate in the epilogue, and an optional key mask; the confidence head's FP32 triangle attention uses it too (1.6 vs 3.0 ms per call for cuEquivariance's FP32 kernel) | `triton_attention.py`, `triangular.py` | `MOL_TMA_ATTENTION=0` |
+| Diffusion token attention on FlashAttention-4 (with TF32 enabled, on Blackwell with the CuTe DSL installed, as for `tri_fa4`): the q/k/v/gate projection, the attention and the output projection in FP16 with FP32 accumulation (FP16 has TF32's 10-bit mantissa; softmax stays FP32) on the FA4 SM100 kernel of `tri_fa4`, compiled for FP16 at head dim 48: the pair bias added by the tensor cores, the sigmoid gate in the correction epilogue (gate tiles read in 16-byte loads, the product rounded once to f16x2), three bias stages, 80 registers for the correction warps. 21.1 us per call at [5, 16, 644, 48] against 74 us for the Triton TMA kernel; the 24-block token transformer 3.0 vs 4.5 ms per step. On 9fm7, against two runs of the Triton path: per-sample RMSD 0.08-0.18 A (0.08-0.50 A between those two runs), mean pLDDT within 0.04 (0.12), pTM within 7e-4 (4e-4). The pair biases are converted to FP16 (keys padded to a multiple of 8) once per prediction, 0.3 GB at 9fm7 | `fa4_attention.py`, `diffusion_fast.py`, `tri_fa4/` | `MOL_FA4_ATTENTION=0` |
 | Diffusion transformer blocks: the s-side projections of all blocks (both adaptive LayerNorms, both output gates) as one LayerNorm and two wide GEMMs per group of blocks, AdaLN of the activations as one Triton kernel that also applies the previous sublayer's gated residual and takes the gate sigmoids, q/k/v/g as one GEMM: about 45 kernels per block become 9. The atom encoder and decoder transformers take the same path (cross-attention mode: keys and values from a second AdaLN; their conditioning is shared by the samples and computed once per atom). Diffusion 2.08 -> 1.39 s with TF32, 14.7 -> 12.2 s in full FP32 | `diffusion_fast.py`, `transformer.py` | `MOL_FUSED_DIFFUSION_BLOCKS=0` |
 | Template embedder: templates with identical features go through its Pairformer once (without templates the featurizer still emits four, all masked: slot 0 all gaps, slots 1-3 zero padding, so 4 runs become 2), linear_no_bias_z(z) is shared by the templates and the z-independent template projection is computed once per prediction instead of every cycle. Bit-identical output; 16.0 -> 7.5 ms per cycle on 9fm7, trunk 8.64 -> 8.46 s. Skipping the embedder entirely is not equivalent: masked templates still pass linear_no_bias_z(LayerNorm(z)) through the stack, so the output depends on z | `pairformer.py`, `mol.py` | `MOL_DEDUP_TEMPLATES=0` |
 | Pair bias: LayerNorm + head projection + transpose in one pass | `pair_bias.py` | `MOL_FUSED_PAIR_BIAS=0` |
@@ -141,7 +146,7 @@ time per call from nsys, `--enable_tf32 true`:
 | Pairformer transition, C=320 (800) | 0.50 ms (GEMM) | 1.36 ms | 0.84 ms | 1.7x |
 | PairMixer triangle multiplication, C=448 (320) | 0.61 ms | 1.86 ms | 1.58 ms | 2.6x |
 | PairMixer transition, C=448 (160) | 0.99 ms | 2.07 ms | 1.44 ms | 1.5x |
-| Diffusion stage, per step (200) | 1.45 ms (TF32, token transformer) | about 10 ms | 6.9 ms (whole stage, wall) | |
+| Diffusion stage, per step (200) | 1.45 ms (TF32, token transformer) | about 10 ms | 5.5 ms (whole stage, wall) | |
 
 Kernel time on 9fm7 is now 10.3 s: Pairformer stack 6.5 s, MSA module
 1.7 s, diffusion 1.2 s, confidence head 0.54 s, template embedder 0.29 s.
@@ -162,9 +167,43 @@ Remaining gaps, largest first:
   warp-specialized form fails to compile with two accumulators, and without
   warp specialization it is slower than cuBLAS.
 - Diffusion: about 420 kernels per step (was 1,290) after fusing the token
-  and atom transformer blocks; the token attention kernel (67-74 us per call
-  vs about 10 us) is latency-bound in Triton's TF32 flash attention and is
-  the largest single item (about 0.36 s).
+  and atom transformer blocks. The token attention takes 21.1 us per call on
+  FA4 (about 0.1 s per prediction; it was 67-74 us in Triton) against a
+  SOL of about 10 us. FA4 at head dim 48 is bound by the latency of its
+  per-key-block chain (about 1.2 us per 2 x 128 x 128 step, twice what its
+  exponentials need: GB300 runs ex2 at 30 per clock per SM, measured), and
+  the shape quantizes badly: 644 = 5 x 128 + 4, so a sixth key block and a
+  sixth query tile per head are almost empty (16% each), and the 240 work
+  units (80 heads x 3 x 256 rows) take two rounds on 152 SMs (one round of
+  one unit per CTA takes about 5 us plus 1.2 us per key block). The
+  attention is now 21 of the 125 us per token transformer block.
+
+Kernel work that did not pay off (fourth round, FA4 token attention at
+[5, 16, 644, 48], 21.1 us per call; 20.5 us with the tanh gate below):
+
+- Tile shapes: 96-key blocks (7 blocks, 672 keys instead of 768) 26.6 us,
+  192-key blocks 40.6 us, one 128-row query tile per CTA (480 units) 27.6
+  us, the non-persistent scheduler 23.3 us, the CLC scheduler 20.5 us. With
+  the bias and gate both on, FA4's four bias stages leave shared memory for a
+  single K/V stage, which hung; two stages 24.0 us, three 22.0 us.
+- FA4's partial exp2 emulation on the FMA pipe (off by default on sm_103):
+  22.2-23.4 us against 21.9 us; the kernel is not exp-bound.
+- P in its own TMEM columns (S0 P0 S1 P1 O0 O1), so the MMA warp computes
+  S(i+1) as soon as the softmax warps hold S(i) in registers instead of after
+  P(i) V: 21.1 vs 20.6 us, no gain (and the correction warps would then need
+  to wait for P(i-1) V before rescaling O).
+- Releasing each softmax warp group's statistics buffer as soon as the
+  correction warps read it (FA4 releases it after processing the other warp
+  group, which keeps the two in alternation): the per-step chain shortened
+  in an instrumented run (clock stamps per event), but no change uninstrumented.
+- The gate: FA4's sigmoid (exp2 + rcp per element, FP32) in the correction
+  epilogue cost 2.8 us per call. Precomputing sigmoid(g) in place in shared
+  memory by the epilogue warp was slower (+1.5 us: one warp of tanh competes
+  for issue with the softmax warps); what helped was 16-byte gate loads and 80
+  registers for the correction warps (2.8 -> 1.5 us). The sigmoid as f16x2
+  tanh.approx (one MUFU op per two elements) saved another 0.6 us but lowered
+  pLDDT on 9fm7 by 0.2 in two runs (run-to-run spread 0.1): small gates
+  cancel in 0.5 + 0.5 tanh, so the gate stays FP32 ex2 + rcp.
 
 Kernel work that did not pay off (third round):
 

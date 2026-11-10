@@ -26,6 +26,9 @@ Needs flash-attn-4 (shipped in NVIDIA's PyTorch containers) and the CuTe DSL
 ``MOL_CUTE_DSL_DIR``). The kernel is compiled once (about 30 s) and linked into a
 shared library next to the other extension builds; later processes load that
 through tvm_ffi alone, without importing the DSL. ``MOL_TRI_FA4=0`` disables it.
+
+``load_variant`` builds the same kernel for other dtypes, head dims and tile
+configs (the diffusion token attention, ``modules/fa4_attention.py``).
 """
 
 import fcntl
@@ -46,9 +49,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _fn = None
 _failed = False
 _seqused = {}
+_variants = {}
+
+# The triangle attention build: BF16, head dim 32.
+_TRI = ("tri_fa4", "bfloat16", 32, (("m_block_size", 128), ("n_block_size", 128), ("q_stage", 2)))
 
 
-def _library_path():
+def _library_path(name, dtype, head_dim, cfg):
     from mol.model.layer_norm.torch_ext_compile import _resolve_build_directory
 
     h = hashlib.sha256()
@@ -59,12 +66,14 @@ def _library_path():
             pass
     with open(os.path.join(_HERE, "flash_fwd_sm100.py"), "rb") as f:
         h.update(f.read())
+    if name != _TRI[0]:  # (keeps the triangle build's existing file name)
+        h.update(repr((dtype, head_dim, cfg)).encode())
     major, minor = torch.cuda.get_device_capability()
-    return _resolve_build_directory("mol_tri_fa4", None) / f"tri_fa4_sm{major}{minor}_{h.hexdigest()[:16]}.so"
+    return _resolve_build_directory("mol_tri_fa4", None) / f"{name}_sm{major}{minor}_{h.hexdigest()[:16]}.so"
 
 
-def _build(so):
-    """Compile the kernel with the CuTe DSL and link it into `so`."""
+def _build(so, name, dtype, head_dim, cfg):
+    """Compile the kernel with the CuTe DSL and link it into `so`, exported as `name`."""
     import cutlass.cute as cute
     from cutlass.runtime import find_runtime_libraries
     from flash_attn.cute.cute_dsl_utils import to_cute_tensor
@@ -72,14 +81,14 @@ def _build(so):
 
     from .flash_fwd_sm100 import FlashAttentionForwardSm100
 
-    b, n, h, d = 1, 256, 2, 32
-    q, k, v, g, o = (torch.empty(b, n, h, d, device="cuda", dtype=torch.bfloat16) for _ in range(5))
-    bias = torch.empty(h, n, n, device="cuda", dtype=torch.bfloat16)
+    b, n, h, d = 1, 256, 2, head_dim
+    dt = getattr(torch, dtype)
+    q, k, v, g, o = (torch.empty(b, n, h, d, device="cuda", dtype=dt) for _ in range(5))
+    bias = torch.empty(h, n, n, device="cuda", dtype=dt)
     seqused_k = torch.full((b,), n, dtype=torch.int32, device="cuda")
     fa = FlashAttentionForwardSm100(
         d, d, qhead_per_kvhead=1, is_causal=False, is_local=False, is_split_kv=False,
-        pack_gqa=False, m_block_size=128, n_block_size=128, q_stage=2, is_persistent=True,
-        has_bias=True, has_gate=True,
+        pack_gqa=False, is_persistent=True, has_bias=True, has_gate=True, **dict(cfg),
     )
     fn = cute.compile(
         fa, *(to_cute_tensor(t) for t in (q, k, v, o)), None, 1.0, None, None, None,
@@ -89,7 +98,7 @@ def _build(so):
         options="--enable-tvm-ffi",
     )
     obj = f"{so}.{os.getpid()}.o"
-    fn.export_to_c(object_file_path=obj, function_name="tri_fa4")
+    fn.export_to_c(object_file_path=obj, function_name=name)
     runtime = [p for p in find_runtime_libraries(enable_tvm_ffi=False) if p.endswith("libcute_dsl_runtime.so")]
     lib_dir = os.path.dirname(runtime[0])
     tmp = f"{so}.{os.getpid()}.tmp"
@@ -101,29 +110,40 @@ def _build(so):
     os.remove(obj)
 
 
-def _load():
-    global _fn, _failed
-    if _fn is not None or _failed:
-        return _fn
-    _failed = True
+def load_variant(name, dtype, head_dim, cfg):
+    """The FA4 forward with bias and gate for (dtype, head_dim, tile config
+    `cfg`, a tuple of (key, value) pairs), compiled once and cached on disk;
+    None (logged) without the CuTe DSL / FA4 or if the build fails."""
+    key = (name, dtype, head_dim, cfg)
+    if key in _variants:
+        return _variants[key]
+    _variants[key] = None
     dsl_dir = os.environ.get("MOL_CUTE_DSL_DIR")
     if dsl_dir:
         site.addsitedir(dsl_dir)
     try:
-        so = _library_path()
+        so = _library_path(name, dtype, head_dim, cfg)
         if not so.exists():
             with open(f"{so}.lock", "w") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)  # one build across processes
                 if not so.exists():
-                    logger.info("Compiling the FA4 triangle attention kernel (once, about 30 s)")
-                    _build(so)
+                    logger.info("Compiling the FA4 kernel %s (once, about 30 s)", name)
+                    _build(so, name, dtype, head_dim, cfg)
         import tvm_ffi
 
-        _fn = tvm_ffi.load_module(str(so))["tri_fa4"]
-        _failed = False
+        _variants[key] = tvm_ffi.load_module(str(so))[name]
     except Exception as ex:  # no CuTe DSL / FA4, or a failed build: callers fall back
         msg = next((line for line in str(ex).splitlines() if line.strip()), type(ex).__name__)
-        logger.info("FA4 triangle attention unavailable: %s", msg)
+        logger.info("FA4 attention (%s) unavailable: %s", name, msg)
+    return _variants[key]
+
+
+def _load():
+    global _fn, _failed
+    if _fn is not None or _failed:
+        return _fn
+    _fn = load_variant(*_TRI)
+    _failed = _fn is None
     return _fn
 
 

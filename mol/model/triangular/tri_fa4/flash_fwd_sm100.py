@@ -5,23 +5,10 @@
 # default off: `has_bias` adds an [H, Q, K] bias to S on the tensor cores (TMA
 # bias tiles, S = bias @ (I / scale) before Q K^T accumulates); `has_gate`
 # multiplies O by sigmoid(gate) in the correction epilogue, the gate tiles
-# loaded by TMA in the epilogue warp. The rest of the package is imported from
-# the installed flash_attn.cute.
-#
-# Supported features:
-# - BF16 & FP16 dtype
-# - noncausal & causal attention
-# - MHA, GQA, MQA
-# - hdim 64, 96, 128, (192, 128).
-# - varlen
-# - sliding window
-# - split-kv
-# Unsupported features that will be added later:
-# - page size != 128
-# - more hdim (192, 256)
-# Based on the cutlass example and cute-dsl example:
-# https://github.com/NVIDIA/cutlass/tree/main/examples/77_blackwell_fmha
-# https://github.com/NVIDIA/cutlass/blob/main/examples/python/CuTeDSL/blackwell/fmha.py
+# loaded by TMA in the epilogue warp (for FP16 output read in 16-byte loads,
+# the gated product converted once to f16x2); `bias_stage` and `num_regs` set
+# the bias pipeline depth and the softmax / correction register split. The
+# rest of the package is imported from the installed flash_attn.cute.
 
 import math
 from typing import Tuple, Callable, Optional, Literal, NamedTuple
@@ -39,6 +26,8 @@ from cutlass import pipeline
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.utils import ClcDynamicPersistentTileScheduler
 from cutlass.base_dsl.arch import Arch
+from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import BaseDSL
 
 from quack import copy_utils, layout_utils
@@ -142,6 +131,42 @@ class DescaleTensors(NamedTuple):
         return DescaleTensors(*((*values, None, None, None)[:3]))
 
 
+@dsl_user_op
+def _gate_mul_f16x2(o0: Float32, o1: Float32, g: cutlass.Uint32, *, loc=None, ip=None) -> cutlass.Uint32:
+    """(o0, o1) * sigmoid(g) rounded to packed f16x2, g packed f16x2. In FP32,
+    sigmoid(x) = 1 / (1 + 2^(-x log2 e)) (ex2 / rcp approx, relative error about 1e-7;
+    tanh.approx-based forms lose the small gates to cancellation)."""
+    return cutlass.Uint32(
+        llvm.inline_asm(
+            T.i32(),
+            [Float32(o0).ir_value(loc=loc, ip=ip), Float32(o1).ir_value(loc=loc, ip=ip),
+             cutlass.Uint32(g).ir_value(loc=loc, ip=ip)],
+            "{\n\t"
+            ".reg .f16 h0, h1;\n\t"
+            ".reg .f32 g0, g1;\n\t"
+            "mov.b32 {h0, h1}, $3;\n\t"
+            "cvt.f32.f16 g0, h0;\n\t"
+            "cvt.f32.f16 g1, h1;\n\t"
+            "mul.ftz.f32 g0, g0, 0fBFB8AA3B;\n\t"  # -log2(e)
+            "mul.ftz.f32 g1, g1, 0fBFB8AA3B;\n\t"
+            "ex2.approx.ftz.f32 g0, g0;\n\t"
+            "ex2.approx.ftz.f32 g1, g1;\n\t"
+            "add.ftz.f32 g0, g0, 0f3F800000;\n\t"
+            "add.ftz.f32 g1, g1, 0f3F800000;\n\t"
+            "rcp.approx.ftz.f32 g0, g0;\n\t"
+            "rcp.approx.ftz.f32 g1, g1;\n\t"
+            "mul.ftz.f32 g0, g0, $1;\n\t"
+            "mul.ftz.f32 g1, g1, $2;\n\t"
+            "cvt.rn.f16x2.f32 $0, g1, g0;\n\t"
+            "}\n",
+            "=r,f,f,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+        )
+    )
+
+
 class FlashAttentionForwardSm100:
 
     def __init__(
@@ -169,12 +194,14 @@ class FlashAttentionForwardSm100:
         use_clc_scheduler: bool = False,
         has_bias: bool = False,
         has_gate: bool = False,
+        bias_stage: int = 4,
+        num_regs: Optional[Tuple[int, int]] = None,
     ):
         # Output gate: O *= sigmoid(gate), gate laid out like O, loaded by TMA in the epilogue warp.
         self.has_gate = has_gate
         # Pair bias [H, Q, K] added to S by the tensor cores (bias tile @ identity).
         self.has_bias = has_bias
-        self.bias_stage = 4 if has_bias else 1
+        self.bias_stage = bias_stage if has_bias else 1
         self.use_tma_KV = not paged_kv_non_tma
         # self.dtype = dtype
         # padding head_dim to a multiple of 16 as k_block_size
@@ -369,6 +396,9 @@ class FlashAttentionForwardSm100:
                 self.num_regs_correction = 64
             self.num_regs_other = 512 - self.num_regs_softmax * 2 - self.num_regs_correction
 
+        if num_regs is not None:  # (softmax, correction); the other warps get the rest
+            self.num_regs_softmax, self.num_regs_correction = num_regs
+            self.num_regs_other = 512 - self.num_regs_softmax * 2 - self.num_regs_correction
         self.buffer_align_bytes = 1024
 
     def _setup_attributes(self):
@@ -394,6 +424,8 @@ class FlashAttentionForwardSm100:
         # gate buffer (like sO) and the 1 KB alignment of the extra buffers (bias, identity, gate)
         smem_size_bias += (smem_size_o if self.has_gate else 0) + 3 * 1024
         kv_stage = min((224 * 1024 - smem_size_q_o - smem_size_bias) // smem_size_kv_per_stage, 32)
+        # a single K/V stage hung in testing (head dim 48, bias_stage=4, gate)
+        assert kv_stage >= 2, f"no shared memory for 2 K/V stages (bias_stage={self.bias_stage})"
         if self.head_dim_padded == 192 and self.head_dim_v_padded == 128 and kv_stage == 2:
             # For hdim 192,128, we can fit 3 stages if we use uneven_kv_smem
              kv_stage = 3
@@ -3061,12 +3093,30 @@ class FlashAttentionForwardSm100:
             tGsG_i = cute.logical_divide(tGsG, cute.make_layout((self.m_block_size, corr_tile_size)))
             tGsG_s2r = copy_utils.partition_D_position_independent(thr_tmem_load, tGsG_i[(None, None), None])
             pipeline_gate.consumer_wait_w_index_phase(stage, gate_phase)
+            if const_expr(self.o_dtype == cutlass.Float16):
+                # all of this thread's gate values up front, in 16-byte loads (autovec_copy
+                # per chunk was 1.3 us slower per call at [5, 16, 644, 48])
+                n_chunks = self.head_dim_v_padded // corr_tile_size
+                tGrG_all = cute.make_rmem_tensor((tOcO_t2r[None, 0, 0, 0].shape, n_chunks), self.o_dtype)
+                tiled_smem_load = cute.make_tiled_copy_D(
+                    cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), self.o_dtype, num_bits_per_copy=128),
+                    tiled_tmem_load,
+                )
+                for c in cutlass.range_constexpr(n_chunks):
+                    cute.copy(tiled_smem_load, tGsG_s2r[None, 0, 0, c], tGrG_all[None, c])
         for i in cutlass.range(self.head_dim_v_padded // corr_tile_size, unroll_full=True):
             tOtO_t2r_i = tOtO_t2r[None, 0, 0, i]
             tOsO_r2s_i = tOsO_s2r[None, 0, 0, i]
             tOrO_frg = cute.make_rmem_tensor(tOcO_t2r[None, 0, 0, i].shape, self.pv_acc_dtype)
             cute.copy(tiled_tmem_load, tOtO_t2r_i, tOrO_frg)
-            if const_expr(self.has_gate):
+            if const_expr(self.has_gate and self.o_dtype == cutlass.Float16):
+                tGrG_u32 = cute.recast_tensor(tGrG_all[None, i], cutlass.Uint32)
+                tOrO16 = cute.make_fragment_like(tOrO_frg, self.o_dtype)
+                tOrO16_u32 = cute.recast_tensor(tOrO16, cutlass.Uint32)
+                for j in cutlass.range(cute.size(tOrO16_u32), unroll_full=True):
+                    tOrO16_u32[j] = _gate_mul_f16x2(tOrO_frg[2 * j] * scale, tOrO_frg[2 * j + 1] * scale, tGrG_u32[j])
+                cute.copy(tiled_smem_store, tOrO16, tOsO_r2s_i)
+            elif const_expr(self.has_gate):
                 tGrG = cute.make_rmem_tensor(tOcO_t2r[None, 0, 0, i].shape, self.o_dtype)
                 cute.autovec_copy(tGsG_s2r[None, 0, 0, i], tGrG)
                 tGrG_f = tGrG.load().to(Float32)
@@ -3075,12 +3125,13 @@ class FlashAttentionForwardSm100:
                     tOrO_frg[j] = tOrO_frg[j] * cute.arch.rcp_approx(
                         1.0 + cute.math.exp2(tGrG_f[j] * -1.4426950408889634, fastmath=True)
                     ) * scale
+                copy_utils.cvt_copy(tiled_smem_store, tOrO_frg, tOsO_r2s_i)
             else:
                 for j in cutlass.range(0, cute.size(tOrO_frg), 2, unroll_full=True):
                     tOrO_frg[j], tOrO_frg[j + 1] = cute.arch.mul_packed_f32x2(
                         (tOrO_frg[j], tOrO_frg[j + 1]), (scale, scale)
                     )
-            copy_utils.cvt_copy(tiled_smem_store, tOrO_frg, tOsO_r2s_i)
+                copy_utils.cvt_copy(tiled_smem_store, tOrO_frg, tOsO_r2s_i)
         if const_expr(self.has_gate):
             pipeline_gate.consumer_release_w_index(stage)
         cute.arch.fence_view_async_shared()
