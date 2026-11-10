@@ -14,8 +14,9 @@
 
 """Triangle multiplication GEMMs on Blackwell as CuTe DSL kernels (BF16, inference).
 
-- gated_projection: ab = sigmoid(x_in W_g^T) * (x_in W_p^T) * mask as [2C, M], with the X tile
-  resident in shared memory while the weight blocks stream past (projection_sm100.py).
+- gated_projection: ab = sigmoid(x_in W_g^T) * (x_in W_p^T) * mask as [2C, M]: CTA pairs
+  (cta_group::2 MMAs) with the X tile resident in shared memory while the weight blocks
+  stream past (projection_sm100.py).
   ``MOL_TRIMUL_CUTE_PROJECTION=0`` disables it.
 - gated_output: out = sigmoid(x_in W_g^T) * (LayerNorm(t)^T W_p^T) (+ residual), with t the
   [C, M] einsum output read in place (no LayerNorm-transpose pass, no [M, C] projections in
@@ -256,6 +257,7 @@ def gated_projection(x: torch.Tensor, w_il: torch.Tensor, mask: torch.Tensor):
     if fn is None:
         return None
     ab = torch.empty(2 * c, m, device=x.device, dtype=x.dtype)
-    if not _call(("proj", c), fn, x.unsqueeze(-1), w_il.unsqueeze(-1), mask, ab.t(), _ctas(x.device, m)):
+    pairs = min(_ctas(x.device, m) // 2, (m + 255) // 256)  # CTA pairs, 256 positions each
+    if not _call(("proj", c), fn, x.unsqueeze(-1), w_il.unsqueeze(-1), mask, ab.t(), 2 * pairs):
         return None
     return ab
