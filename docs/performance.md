@@ -13,13 +13,18 @@ first prediction.
 | Now, defaults | 8.6 s | 12.2 s | 2.9 s | 23.8 s |
 | Before, `--enable_tf32 true --infer_setting.sample_diffusion_chunk_size 5` | 25.9 s | 6.5 s | 1.45 s | 34.0 s |
 | Now, same flags | 8.6 s | 1.39 s | 0.55 s | 10.6 s |
-| Now, same flags, FA4 triangle attention installed (below) | 8.1 s | 1.39 s | 0.55 s | 10.2 s |
-| Now, same flags, FA4 and the CuTe DSL triangle multiplication kernels (below) | 7.4 s | 1.39 s | 0.55 s | 9.4 s |
 | Now, same flags plus `--bf16_confidence_head true` | 8.6 s | 1.38 s | 0.23 s | 10.3 s |
-| Now, same flags, FA4 triangle and token attention (below) | 8.2 s | 1.11 s | 0.55 s | 9.9 s |
+| Now, same flags, FA4 and the CuTe DSL kernels installed (below) | 7.24 s | 1.08 s | 0.55 s | 8.94 s |
+| The same code with the four newest switches off (below) | 8.15 s | 1.38 s | 0.55 s | 10.16 s |
 
-The last row was measured on a shared node against 10.25 s (diffusion 1.40 s)
-for the same code with `MOL_FA4_ATTENTION=0` in the same session.
+The last two rows were measured back to back on an otherwise idle node
+(median of three after a warm-up). The switches are `MOL_DEDUP_TEMPLATES=0
+MOL_FA4_ATTENTION=0 MOL_TRIMUL_CUTE_PROJECTION=0 MOL_TRIMUL_FUSED_OUT=0`
+(template dedup, FP16 FA4 token attention, CuTe DSL triangle
+multiplication); the FA4 triangle attention and the Triton bias gather stay
+on in both. The trunk drops by 0.91 s (triangle multiplication about 0.7 s,
+template dedup about 0.18 s, the bias gather about 0.04 s) and diffusion by
+0.30 s.
 
 Other inputs, one `mol pred` process per input file, same flags as the
 second pair of rows (`--use_msa false` for the FoldBench inputs). The first
