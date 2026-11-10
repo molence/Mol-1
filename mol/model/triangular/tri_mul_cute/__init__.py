@@ -166,6 +166,7 @@ def supported(t: torch.Tensor, c: int) -> bool:
         and c % 64 == 0
         and bn % 32 == 0
         and t.shape[-1] % 8 == 0
+        and t.numel() < 2**31  # 32-bit offsets in the kernel
         and torch.cuda.get_device_capability(t.device)[0] == 10
         and ("out", c, True) not in _failed
     )
@@ -241,6 +242,7 @@ def projection_supported(x: torch.Tensor, c: int) -> bool:
         and not torch.is_grad_enabled()
         and c % 64 == 0
         and x.shape[0] % 8 == 0
+        and 2 * x.numel() < 2**31  # 32-bit offsets in the kernel ([2C, M] output)
         and torch.cuda.get_device_capability(x.device)[0] == 10
         and ("proj", c) not in _failed
     )
