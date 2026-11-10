@@ -62,6 +62,40 @@ def _gate_out_kernel(G, P, RES, OUT, M, C: tl.constexpr, HAS_RES: tl.constexpr,
     tl.store(OUT + off, y.to(OUT.dtype.element_ty), mask=mask)
 
 
+@triton.jit
+def _ln_stats_kernel(T, MEAN, RSTD, M, eps, C: tl.constexpr, BLOCK_P: tl.constexpr, BLOCK_C: tl.constexpr):
+    # mean and 1/std over the channels of T [C, M] (positions contiguous)
+    p = tl.program_id(0) * BLOCK_P + tl.arange(0, BLOCK_P)
+    pm = p < M
+    s1 = tl.zeros((BLOCK_P,), tl.float32)
+    s2 = tl.zeros((BLOCK_P,), tl.float32)
+    for c0 in tl.range(0, C, BLOCK_C):
+        c = c0 + tl.arange(0, BLOCK_C)
+        x = tl.load(T + c.to(tl.int64)[:, None] * M + p[None, :], mask=(c < C)[:, None] & pm[None, :],
+                    other=0.0).to(tl.float32)
+        s1 += tl.sum(x, 0)
+        s2 += tl.sum(x * x, 0)
+    mean = s1 / C
+    var = tl.maximum(s2 / C - mean * mean, 0.0)
+    tl.store(MEAN + p, mean, mask=pm)
+    tl.store(RSTD + p, tl.rsqrt(var + eps), mask=pm)
+
+
+def ln_stats(t: torch.Tensor, eps: float):
+    """Per-position LayerNorm statistics of t [C, M] over C: (mean, rstd), FP32 [M]."""
+    c, m = t.shape
+    mean = torch.empty(m, device=t.device, dtype=torch.float32)
+    rstd = torch.empty_like(mean)
+    _ln_stats_kernel[(triton.cdiv(m, 512),)](t, mean, rstd, m, eps, C=c, BLOCK_P=512, BLOCK_C=16, num_warps=4)
+    return mean, rstd
+
+
+def fused_output_weights(norm_out_weight, norm_out_bias, p_out_weight):
+    """(W_p * gamma in BF16, rowsum of it, W_p beta) for tri_mul_out.gated_output."""
+    w1 = (p_out_weight.float() * norm_out_weight.float()[None, :]).to(torch.bfloat16).contiguous()
+    return w1, w1.float().sum(1).contiguous(), (p_out_weight.float() @ norm_out_bias.float()).contiguous()
+
+
 # MOL_GATED_PROJECTION=0 keeps the input projection on cuBLAS + _gate_in_kernel.
 _GATED_PROJECTION = os.getenv("MOL_GATED_PROJECTION", "1") != "0"
 GATE_BLOCK = 64
@@ -145,10 +179,12 @@ def triangle_multiplicative_update(
     eps: float,
     residual: torch.Tensor = None,
     in_weight_interleaved: torch.Tensor = None,
+    out_fused_weights: tuple = None,
 ) -> torch.Tensor:
     """x: [N, N, C]; mask: broadcastable to [N, N]; in_weight: [g_in; p_in] as [4C, C]
     (weights already in x.dtype); in_weight_interleaved: interleave_gate_weight(in_weight),
-    enables gated_projection. Returns the update, plus ``residual`` if given."""
+    enables gated_projection; out_fused_weights: fused_output_weights(...), enables the fused
+    output kernel (tri_mul_out). Returns the update, plus ``residual`` if given."""
     from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
 
     n1, n2, c = x.shape
@@ -173,6 +209,18 @@ def triangle_multiplicative_update(
     else:
         t = torch.einsum("dbki,dbkj->dbij", a, b)
     del ab, a, b
+    if out_fused_weights is not None and x.dtype == torch.bfloat16:
+        # LayerNorm, output projection, gating and residual in one kernel reading t in place
+        from mol.model.triangular import tri_mul_out
+
+        t2 = t.view(c, m)
+        if tri_mul_out.supported(t2, c):
+            w1, u, v = out_fused_weights
+            mean, rstd = ln_stats(t2, eps)
+            res = residual.reshape(m, c) if residual is not None else None
+            out = tri_mul_out.gated_output(t2, x_in, w1, g_out_weight, mean, rstd, u, v, residual=res)
+            if out is not None:
+                return out.view(n1, n2, c)
     x_out = layer_norm_transpose(t, norm_out_weight, norm_out_bias, eps=eps, layout="dbij->bijd")
     del t
 
