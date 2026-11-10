@@ -196,9 +196,24 @@ def gated_output(
         return None
     out = torch.empty(m, c, device=t.device, dtype=t.dtype)
     res = residual if residual is not None else out
-    fn(t.t().unsqueeze(-1), x_in.unsqueeze(-1), w1.unsqueeze(-1), w_g.unsqueeze(-1), res.unsqueeze(-1),
-       out.unsqueeze(-1), mean, rstd, u, v, _ctas(t.device, m))
+    if u.dtype != torch.float32 or v.dtype != torch.float32 or mean.dtype != torch.float32:
+        return None
+    if not _call(("out", c, residual is not None), fn, t.t().unsqueeze(-1), x_in.unsqueeze(-1), w1.unsqueeze(-1),
+                 w_g.unsqueeze(-1), res.unsqueeze(-1), out.unsqueeze(-1), mean, rstd, u, v, _ctas(t.device, m)):
+        return None
     return out
+
+
+def _call(key, fn, *args) -> bool:
+    """Run a loaded kernel; an argument mismatch (raised before launch) disables that kernel."""
+    try:
+        fn(*args)
+    except (TypeError, ValueError) as ex:
+        logger.warning("Triangle multiplication kernel %s rejected its arguments, disabled: %s", key, ex)
+        _fns.pop(key, None)
+        _failed.add(key)
+        return False
+    return True
 
 
 def _ctas(device, m: int) -> int:
@@ -241,5 +256,6 @@ def gated_projection(x: torch.Tensor, w_il: torch.Tensor, mask: torch.Tensor):
     if fn is None:
         return None
     ab = torch.empty(2 * c, m, device=x.device, dtype=x.dtype)
-    fn(x.unsqueeze(-1), w_il.unsqueeze(-1), mask, ab.t(), _ctas(x.device, m))
+    if not _call(("proj", c), fn, x.unsqueeze(-1), w_il.unsqueeze(-1), mask, ab.t(), _ctas(x.device, m)):
+        return None
     return ab

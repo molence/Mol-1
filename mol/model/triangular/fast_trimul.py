@@ -95,10 +95,13 @@ def cute_weights(in_weight, norm_out_weight, norm_out_bias, p_out_weight):
     interleaved in blocks of 128, W_p * gamma in BF16, its row sums, W_p beta)."""
     from mol.model.triangular.tri_mul_cute import BLOCK, interleave_128
 
-    w_in = in_weight.to(torch.bfloat16)
-    w_il = interleave_128(w_in) if (w_in.shape[0] // 2) % BLOCK == 0 else None
-    w1 = (p_out_weight.float() * norm_out_weight.float()[None, :]).to(torch.bfloat16).contiguous()
-    return w_il, w1, w1.float().sum(1).contiguous(), (p_out_weight.float() @ norm_out_bias.float()).contiguous()
+    with torch.autocast("cuda", enabled=False):
+        w_in = in_weight.to(torch.bfloat16)
+        w_il = interleave_128(w_in) if (w_in.shape[0] // 2) % BLOCK == 0 else None
+        w1 = (p_out_weight.float() * norm_out_weight.float()[None, :]).to(torch.bfloat16).contiguous()
+        u = w1.float().sum(1).contiguous()
+        v = (p_out_weight.float() * norm_out_bias.float()[None, :]).sum(1).contiguous()
+    return w_il, w1, u, v
 
 
 # MOL_GATED_PROJECTION=0 keeps the input projection on cuBLAS + _gate_in_kernel.
