@@ -292,13 +292,13 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
         key = (dtype, tuple((p.data_ptr(), p._version) for p in params))
         cached = getattr(self, "_fast_w_cache", None)
         if cached is None or cached[0] != key:
-            from mol.model.triangular.fast_trimul import GATE_BLOCK, fused_output_weights, interleave_gate_weight
+            from mol.model.triangular.fast_trimul import GATE_BLOCK, cute_weights, interleave_gate_weight
 
             p = [t.to(dtype) for t in params]
             w_in = torch.cat(p[2:6], 0)
             w_il = interleave_gate_weight(w_in) if (w_in.shape[0] // 2) % GATE_BLOCK == 0 else None
             weights = (p[0], p[1], w_in, p[6], p[7], p[8], p[9])
-            fused = fused_output_weights(params[6], params[7], params[8]) if dtype == torch.bfloat16 else None
+            fused = cute_weights(w_in, params[6], params[7], params[8]) if dtype == torch.bfloat16 else None
             self._fast_w_cache = (key, (weights, w_il, fused))
         return self._fast_w_cache[1]
 
@@ -609,7 +609,7 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
                     eps=1e-5,
                     residual=z_in if fuse_residual else None,
                     in_weight_interleaved=w_in_interleaved,
-                    out_fused_weights=out_fused,
+                    cute_w=out_fused,
                 )
                 if pad:
                     out = out[..., :n_tok, :n_tok, :]

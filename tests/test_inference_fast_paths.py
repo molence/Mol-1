@@ -219,22 +219,24 @@ class TriangleFastPathTest(unittest.TestCase):
         finally:
             torch.backends.cuda.matmul.allow_tf32 = old
 
-    def test_fast_trimul_fused_output_matches_cuequivariance(self):
-        """LayerNorm, output projection, gating and residual as one CuTe DSL kernel (Blackwell)."""
-        import mol.model.triangular.tri_mul_out as tmo
+    def test_fast_trimul_cute_kernels_match_cuequivariance(self):
+        """CuTe DSL gated projection and fused output side (LayerNorm folded, both GEMMs,
+        gating, residual) on Blackwell."""
+        import mol.model.triangular.tri_mul_cute as tmc
 
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("needs Blackwell")
         for c in (64, 128):
-            self._fast_trimul(torch.bfloat16, atol=5e-2, rtol=2e-2, fused_out=True, n=72, c=c)
-            if (c, True) not in tmo._fns:
+            self._fast_trimul(torch.bfloat16, atol=5e-2, rtol=2e-2, use_cute=True, n=72, c=c)
+            if ("out", c, True) not in tmc._fns:
                 self.skipTest("needs the CuTe DSL")
-            self.assertIn((c, False), tmo._fns)
+            self.assertIn(("out", c, False), tmc._fns)
+            self.assertIn(("proj", c), tmc._fns)
 
-    def _fast_trimul(self, dt, atol, rtol, fused_out=False, n=64, c=64):
+    def _fast_trimul(self, dt, atol, rtol, use_cute=False, n=64, c=64):
         from cuequivariance_torch.primitives.triangle import triangle_multiplicative_update
 
-        from mol.model.triangular.fast_trimul import fused_output_weights
+        from mol.model.triangular.fast_trimul import cute_weights
         from mol.model.triangular.fast_trimul import triangle_multiplicative_update as fast
 
         torch.manual_seed(0)
@@ -247,10 +249,10 @@ class TriangleFastPathTest(unittest.TestCase):
         from mol.model.triangular.fast_trimul import interleave_gate_weight
 
         w_in = torch.cat([g_in, p_in])
-        fused = fused_output_weights(now, nob, p_out) if fused_out else None
+        fused = cute_weights(w_in, now, nob, p_out) if use_cute else None
         for direction, w_il in (("outgoing", None), ("incoming", None), ("outgoing", interleave_gate_weight(w_in)),
                                 ("incoming", interleave_gate_weight(w_in))):
-            for r in (res, None) if fused_out else (res,):
+            for r in (res, None) if use_cute else (res,):
                 with torch.no_grad():
                     ref = triangle_multiplicative_update(
                         x[None], direction=direction, mask=mask[None], norm_in_weight=niw,
@@ -259,7 +261,7 @@ class TriangleFastPathTest(unittest.TestCase):
                         g_out_weight=g_out, eps=1e-5,
                     )[0].float()
                     out = fast(x, direction, mask, niw, nib, w_in, now, nob, p_out, g_out, 1e-5, residual=r,
-                               in_weight_interleaved=w_il, out_fused_weights=fused).float()
+                               in_weight_interleaved=w_il, cute_w=fused).float()
                 keep = mask.bool()
                 expect = ref + r.float() if r is not None else ref
                 torch.testing.assert_close(out[keep], expect[keep], atol=atol, rtol=rtol)

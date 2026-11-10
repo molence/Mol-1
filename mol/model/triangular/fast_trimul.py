@@ -90,10 +90,15 @@ def ln_stats(t: torch.Tensor, eps: float):
     return mean, rstd
 
 
-def fused_output_weights(norm_out_weight, norm_out_bias, p_out_weight):
-    """(W_p * gamma in BF16, rowsum of it, W_p beta) for tri_mul_out.gated_output."""
+def cute_weights(in_weight, norm_out_weight, norm_out_bias, p_out_weight):
+    """Weights for the CuTe DSL kernels (tri_mul_cute), BF16 activations: (input weight [g; p]
+    interleaved in blocks of 128, W_p * gamma in BF16, its row sums, W_p beta)."""
+    from mol.model.triangular.tri_mul_cute import BLOCK, interleave_128
+
+    w_in = in_weight.to(torch.bfloat16)
+    w_il = interleave_128(w_in) if (w_in.shape[0] // 2) % BLOCK == 0 else None
     w1 = (p_out_weight.float() * norm_out_weight.float()[None, :]).to(torch.bfloat16).contiguous()
-    return w1, w1.float().sum(1).contiguous(), (p_out_weight.float() @ norm_out_bias.float()).contiguous()
+    return w_il, w1, w1.float().sum(1).contiguous(), (p_out_weight.float() @ norm_out_bias.float()).contiguous()
 
 
 # MOL_GATED_PROJECTION=0 keeps the input projection on cuBLAS + _gate_in_kernel.
@@ -179,12 +184,12 @@ def triangle_multiplicative_update(
     eps: float,
     residual: torch.Tensor = None,
     in_weight_interleaved: torch.Tensor = None,
-    out_fused_weights: tuple = None,
+    cute_w: tuple = None,
 ) -> torch.Tensor:
     """x: [N, N, C]; mask: broadcastable to [N, N]; in_weight: [g_in; p_in] as [4C, C]
     (weights already in x.dtype); in_weight_interleaved: interleave_gate_weight(in_weight),
-    enables gated_projection; out_fused_weights: fused_output_weights(...), enables the fused
-    output kernel (tri_mul_out). Returns the update, plus ``residual`` if given."""
+    enables gated_projection; cute_w: cute_weights(...), enables the CuTe DSL projection and
+    fused output kernels (tri_mul_cute) in BF16. Returns the update, plus ``residual`` if given."""
     from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
 
     n1, n2, c = x.shape
@@ -194,7 +199,15 @@ def triangle_multiplicative_update(
 
     # [4C, M] = [g_in; p_in] @ x_in^T, then sigmoid(g) * p * mask -> [2C, M] = [a; b]
     pair_mask = mask.reshape(m).to(x.dtype).contiguous()
-    if in_weight_interleaved is not None and gated_projection_ok(x_in, in_weight):
+    use_cute = cute_w is not None and x.dtype == torch.bfloat16
+    ab = None
+    if use_cute and cute_w[0] is not None:
+        from mol.model.triangular import tri_mul_cute
+
+        ab = tri_mul_cute.gated_projection(x_in, cute_w[0], pair_mask)
+    if ab is not None:
+        pass
+    elif in_weight_interleaved is not None and gated_projection_ok(x_in, in_weight):
         ab = gated_projection(x_in, in_weight_interleaved, pair_mask)
     else:
         g_p = torch.mm(in_weight, x_in.t())
@@ -209,16 +222,16 @@ def triangle_multiplicative_update(
     else:
         t = torch.einsum("dbki,dbkj->dbij", a, b)
     del ab, a, b
-    if out_fused_weights is not None and x.dtype == torch.bfloat16:
+    if use_cute:
         # LayerNorm, output projection, gating and residual in one kernel reading t in place
-        from mol.model.triangular import tri_mul_out
+        from mol.model.triangular import tri_mul_cute
 
         t2 = t.view(c, m)
-        if tri_mul_out.supported(t2, c):
-            w1, u, v = out_fused_weights
+        if tri_mul_cute.supported(t2, c):
+            _, w1, u, v = cute_w
             mean, rstd = ln_stats(t2, eps)
             res = residual.reshape(m, c) if residual is not None else None
-            out = tri_mul_out.gated_output(t2, x_in, w1, g_out_weight, mean, rstd, u, v, residual=res)
+            out = tri_mul_cute.gated_output(t2, x_in, w1, g_out_weight, mean, rstd, u, v, residual=res)
             if out is not None:
                 return out.view(n1, n2, c)
     x_out = layer_norm_transpose(t, norm_out_weight, norm_out_bias, eps=eps, layout="dbij->bijd")
