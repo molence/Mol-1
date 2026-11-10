@@ -199,8 +199,9 @@ def gated_output(
     res = residual if residual is not None else out
     if u.dtype != torch.float32 or v.dtype != torch.float32 or mean.dtype != torch.float32:
         return None
+    pairs = min(_ctas(t.device, m) // 2, (m + 255) // 256)  # CTA pairs, 256 positions each
     if not _call(("out", c, residual is not None), fn, t.t().unsqueeze(-1), x_in.unsqueeze(-1), w1.unsqueeze(-1),
-                 w_g.unsqueeze(-1), res.unsqueeze(-1), out.unsqueeze(-1), mean, rstd, u, v, _ctas(t.device, m)):
+                 w_g.unsqueeze(-1), res.unsqueeze(-1), out.unsqueeze(-1), mean, rstd, u, v, 2 * pairs):
         return None
     return out
 
