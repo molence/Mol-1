@@ -460,5 +460,43 @@ class FusedDiffusionTransformerTest(unittest.TestCase):
                     self._compare(160, local=local, tf32=tf32, s_shape=(1,), cross=True)
 
 
+
+@unittest.skipUnless(CUDA and _cueq_available(), "needs CUDA and cuEquivariance")
+class TemplateDedupTest(unittest.TestCase):
+    def test_matches_loop_over_templates(self):
+        """Identical templates run once and the projection is reused across
+        cycles; the output is bit-identical to the reference loop."""
+        from mol.model.modules.pairformer import TemplateEmbedder
+
+        n, t = 40, 4
+        te = _init(TemplateEmbedder(n_blocks=2, c=64, c_z=128, dropout=0.0), std=0.02)
+        g = torch.Generator(device="cuda").manual_seed(0)
+        # As the featurizer builds them without templates: slot 0 all gaps,
+        # slots 1-3 zero padding, every mask and geometric feature zero.
+        feats = {
+            "asym_id": torch.tensor([0] * 25 + [1] * 15, device="cuda"),
+            "template_aatype": torch.zeros(t, n, dtype=torch.long, device="cuda"),
+            "template_distogram": torch.zeros(t, n, n, 39, device="cuda"),
+            "template_pseudo_beta_mask": torch.zeros(t, n, n, device="cuda"),
+            "template_unit_vector": torch.zeros(t, n, n, 3, device="cuda"),
+            "template_backbone_frame_mask": torch.zeros(t, n, n, device="cuda"),
+        }
+        feats["template_aatype"][0] = 31
+        with_hit = dict(feats)  # one real template in slot 2
+        for k in ("template_distogram", "template_pseudo_beta_mask"):
+            with_hit[k] = feats[k].clone()
+            with_hit[k][2] = torch.rand(with_hit[k][2].shape, device="cuda", generator=g).round()
+        kwargs = dict(triangle_multiplicative="cuequivariance",
+                      triangle_attention="cuequivariance", inplace_safe=True)
+        for ifd, groups in ((feats, [0, 1, 1, 1]), (with_hit, [0, 1, 2, 1])):
+            cache = {}
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                for _ in range(2):  # second call reuses the cached projections
+                    z = torch.randn(n, n, 128, device="cuda", generator=g)
+                    ref = te(ifd, z.clone(), **kwargs)
+                    out = te(ifd, z.clone(), cycle_cache=cache, **kwargs)
+                    self.assertEqual(cache["rep"], groups)
+                    self.assertTrue(torch.equal(out, ref))
+
 if __name__ == "__main__":
     unittest.main()

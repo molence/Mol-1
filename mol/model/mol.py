@@ -277,6 +277,9 @@ class Mol(nn.Module):
         z = torch.zeros_like(z_init)
         s = torch.zeros_like(s_init)
 
+        # Inference: the template embedder keeps per-prediction state across
+        # cycles here (see TemplateEmbedder._dedup_forward).
+        template_cycle_cache = None if self.training else {}
         # Line 7-13 recycling
         for cycle_no in range(N_cycle):
             with torch.set_grad_enabled(
@@ -300,6 +303,7 @@ class Mol(nn.Module):
                             triangle_attention=self._triangle_attention_backend(),
                             inplace_safe=inplace_safe,
                             chunk_size=chunk_size,
+                            cycle_cache=template_cycle_cache,
                         )
                     z = self.msa_module(
                         input_feature_dict,
@@ -321,6 +325,7 @@ class Mol(nn.Module):
                             triangle_attention=self._triangle_attention_backend(),
                             inplace_safe=inplace_safe,
                             chunk_size=chunk_size,
+                            cycle_cache=template_cycle_cache,
                         )
                     z = self.msa_module(
                         input_feature_dict,

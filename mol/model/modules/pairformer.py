@@ -20,6 +20,7 @@
 # Changes: Added the PairMixer block and the width adapter into the Pairformer stack; MSA row chunking.
 
 # pylint: disable=C0114
+import os
 from functools import partial
 from typing import Any, Optional
 
@@ -1216,6 +1217,21 @@ class MSAModule(nn.Module):
         return z
 
 
+# Inference: templates with identical features (the padding templates when a
+# chain has fewer than the maximum, all four slots when there are no templates)
+# go through the template Pairformer once, and the z-independent template
+# projection is computed once per prediction instead of once per cycle. The
+# outputs are bit-identical. MOL_DEDUP_TEMPLATES=0 disables.
+_DEDUP_TEMPLATES = os.getenv("MOL_DEDUP_TEMPLATES", "1") != "0"
+_TEMPLATE_FEATURE_KEYS = (
+    "template_aatype",
+    "template_distogram",
+    "template_pseudo_beta_mask",
+    "template_unit_vector",
+    "template_backbone_frame_mask",
+)
+
+
 class TemplateEmbedder(nn.Module):
     """
     Implements Algorithm 16 in AF3
@@ -1288,6 +1304,7 @@ class TemplateEmbedder(nn.Module):
         triangle_multiplicative: str = "torch",
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        cycle_cache: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1299,6 +1316,10 @@ class TemplateEmbedder(nn.Module):
             triangle_attention: Triangle attention implementation type.
                 - "torch" (default): PyTorch native implementation
                 - "triattention": Optimized tri-attention module
+            cycle_cache (dict, optional): inference only, an empty dict shared by
+                the calls of one prediction (one per recycling cycle) with the
+                same input features; enables the deduplicated path
+                (_dedup_forward). None (training) keeps the reference path.
 
         Returns:
             torch.Tensor: the template feature
@@ -1316,10 +1337,34 @@ class TemplateEmbedder(nn.Module):
         num_templates = input_feature_dict["template_aatype"].shape[0]
         query_num_channels = z.shape[-1]
 
+        # The cached projections assume the default all-ones pair mask.
+        dedup = (
+            _DEDUP_TEMPLATES
+            and cycle_cache is not None
+            and pair_mask is None
+        )
         if pair_mask is None:
             pair_mask = z.new_ones(z.shape[:-1])
 
         z = self.layernorm_z(z)
+        if (
+            dedup
+            and not self.training
+            and not torch.is_grad_enabled()
+        ):
+            u = self._dedup_forward(
+                input_feature_dict,
+                z,
+                pair_mask,
+                multichain_mask,
+                cycle_cache,
+                triangle_attention=triangle_attention,
+                triangle_multiplicative=triangle_multiplicative,
+                inplace_safe=inplace_safe,
+                chunk_size=chunk_size,
+            )
+            assert u.shape == (num_residues, num_residues, query_num_channels)
+            return u
         u = 0
         for template_id in range(num_templates):
             u = u + self.single_template_forward(
@@ -1350,6 +1395,79 @@ class TemplateEmbedder(nn.Module):
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
+        a = self._template_projection(
+            template_id, input_feature_dict, z.shape[0], pair_mask, multichain_mask
+        )
+        v = self.linear_no_bias_z(z) + a
+        return self._template_stack(
+            v,
+            pair_mask,
+            triangle_attention=triangle_attention,
+            triangle_multiplicative=triangle_multiplicative,
+            inplace_safe=inplace_safe,
+            chunk_size=chunk_size,
+        )
+
+    def _dedup_forward(
+        self,
+        input_feature_dict: dict[str, Any],
+        z: torch.Tensor,
+        pair_mask: torch.Tensor,
+        multichain_mask: torch.Tensor,
+        cycle_cache: dict,
+        **stack_kwargs,
+    ) -> torch.Tensor:
+        """forward() after layernorm_z, at inference, bit-identical to the loop
+        over templates: each distinct template (by its input features) goes
+        through the stack once, linear_no_bias_z(z) is shared by the templates,
+        and the z-independent linear_no_bias_a(template features) is kept in
+        cycle_cache for the next cycles. The sum over templates keeps the
+        reference order (u = 0 + v_0 + v_1 + ...)."""
+        num_templates = input_feature_dict["template_aatype"].shape[0]
+        key = (z.shape[0], z.dtype, z.device, torch.get_autocast_dtype(z.device.type),
+               torch.is_autocast_enabled(z.device.type))
+        if cycle_cache.get("key") != key:
+            # One comparison of the template features per prediction (a host sync).
+            rep = []
+            for t in range(num_templates):
+                rep.append(t)
+                for r in sorted(set(rep[:-1])):
+                    if all(
+                        torch.equal(input_feature_dict[k][t], input_feature_dict[k][r])
+                        for k in _TEMPLATE_FEATURE_KEYS
+                    ):
+                        rep[-1] = r
+                        break
+            projections = {
+                r: self._template_projection(
+                    r, input_feature_dict, z.shape[0], pair_mask, multichain_mask
+                )
+                for r in sorted(set(rep))
+            }
+            cycle_cache.clear()
+            cycle_cache.update(key=key, rep=rep, projections=projections)
+        rep, projections = cycle_cache["rep"], cycle_cache["projections"]
+
+        zp = self.linear_no_bias_z(z)
+        outputs = {
+            r: self._template_stack(zp + a, pair_mask, **stack_kwargs)
+            for r, a in projections.items()
+        }
+        u = 0
+        for t in range(num_templates):
+            u = u + outputs[rep[t]]
+        u = u / (1e-7 + num_templates)
+        return self.linear_no_bias_u(self.relu(u))
+
+    def _template_projection(
+        self,
+        template_id: int,
+        input_feature_dict: dict[str, Any],
+        n_token: int,
+        pair_mask: torch.Tensor,
+        multichain_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """linear_no_bias_a of one template's pair features (independent of z)."""
         to_concat = []
 
         dgram = input_feature_dict["template_distogram"][
@@ -1367,8 +1485,8 @@ class TemplateEmbedder(nn.Module):
 
         aatype = input_feature_dict["template_aatype"][template_id]  # [N_token]
         aatype = F.one_hot(aatype, num_classes=len(STD_RESIDUES_WITH_GAP))
-        to_concat.append(expand_at_dim(aatype, dim=-3, n=z.shape[0]))
-        to_concat.append(expand_at_dim(aatype, dim=-2, n=z.shape[0]))
+        to_concat.append(expand_at_dim(aatype, dim=-3, n=n_token))
+        to_concat.append(expand_at_dim(aatype, dim=-2, n=n_token))
 
         unit_vector = input_feature_dict["template_unit_vector"][template_id]
         unit_vector = (
@@ -1383,7 +1501,17 @@ class TemplateEmbedder(nn.Module):
         to_concat.append(backbone_mask_2d.unsqueeze(-1))
 
         at = torch.concat(to_concat, dim=-1)
-        v = self.linear_no_bias_z(z) + self.linear_no_bias_a(at)
+        return self.linear_no_bias_a(at)
+
+    def _template_stack(
+        self,
+        v: torch.Tensor,
+        pair_mask: torch.Tensor,
+        triangle_attention: str = "torch",
+        triangle_multiplicative: str = "torch",
+        inplace_safe: bool = False,
+        chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
         _, v = self.pairformer_stack(
             s=None,
             z=v,
