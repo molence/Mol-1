@@ -14,6 +14,7 @@ first prediction.
 | Before, `--enable_tf32 true --infer_setting.sample_diffusion_chunk_size 5` | 25.9 s | 6.5 s | 1.45 s | 34.0 s |
 | Now, same flags | 8.6 s | 1.39 s | 0.55 s | 10.6 s |
 | Now, same flags, FA4 triangle attention installed (below) | 8.1 s | 1.39 s | 0.55 s | 10.2 s |
+| Now, same flags, FA4 and the CuTe DSL triangle multiplication kernels (below) | 7.4 s | 1.39 s | 0.55 s | 9.4 s |
 | Now, same flags plus `--bf16_confidence_head true` | 8.6 s | 1.38 s | 0.23 s | 10.3 s |
 | Now, same flags, FA4 triangle and token attention (below) | 8.2 s | 1.11 s | 0.55 s | 9.9 s |
 
@@ -85,6 +86,8 @@ variable listed, for comparison or if one misbehaves.
 | Triangle attention on FlashAttention-4 when the CuTe DSL is installed: the FA4 SM100 forward kernel (CuTe DSL) with the same two changes (bias tiles by TMA, S = bias @ I / scale on the tensor cores before q k^T; gate tiles by TMA in the epilogue warp, sigmoid applied in the correction epilogue): 0.91 ms per call at N=648 against 1.13 ms for the CUTLASS kernel, which stays the fallback. Needs flash-attn-4 (in NVIDIA's PyTorch containers) and `pip install "nvidia-cutlass-dsl[cu13]==4.6.0"` (or `MOL_CUTE_DSL_DIR`); compiled once (about 30 s) into a shared library that later processes load through tvm_ffi in about 0.5 s, without importing the DSL (importing it costs about 20 s) | `tri_fa4/`, `triangular.py` | `MOL_TRI_FA4=0` |
 | Triangle multiplication: cuEquivariance's pipeline with the projections on cuBLAS (about 2.4x the throughput of its Triton GEMM at Mol-1's widths) and gating, mask and the residual add fused; in FP32 (the confidence head) only with TF32 enabled, where it is 1.8x faster than cuEquivariance's FP32 kernels | `fast_trimul.py` | `MOL_FAST_TRIMUL=0` |
 | Within it, the input projection gated in the epilogue of a persistent Triton GEMM, so the [4C, N^2] projection never reaches memory (1.4-1.5x) | `fast_trimul.py` | `MOL_GATED_PROJECTION=0` |
+| Within it, with the CuTe DSL installed (BF16, Blackwell), the gated input projection as a CuTe DSL kernel: CTA pairs issuing cta_group::2 tcgen05 MMAs (256 positions x 256 weight rows), each CTA keeping its 128 positions of the normalized input in shared memory while it loads half of every weight block, so the per-SM weight traffic halves and the MMAs run at their 2.05 PF peak with an empty epilogue; sigmoid gating and mask in the epilogue, output chunks staged in shared memory and stored by TMA as [2C, N^2]: 214 vs 341 us per call (C=320), 377 vs 532 us (C=448). Compiled once per width like the FA4 kernel | `tri_mul_cute/projection_sm100.py` | `MOL_TRIMUL_CUTE_PROJECTION=0` |
+| Within it, with the CuTe DSL installed, the whole output side (LayerNorm of the einsum, output projection, sigmoid gate from the input, residual add) as one CuTe DSL kernel: the einsum output is read in its [C, N^2] layout as an MN-major operand (no LayerNorm-transpose pass, no [N^2, C] intermediates), the LayerNorm is folded in (W_p * gamma on the tensor cores, rstd (P - mean u) + v in the epilogue, per-position statistics from a Triton pass, 48 us), both GEMMs per output subtile go to separate TMEM slots so the epilogue overlaps the next subtile's MMAs, CTA pairs as above: 185 + 48 us vs 443 us for the four kernels it replaces (C=320), 282 + 65 vs 657 us (C=448) | `tri_mul_cute/output_sm100.py`, `fast_trimul.py` | `MOL_TRIMUL_FUSED_OUT=0` |
 | Tuned tiles for cuEquivariance's gated GEMM at Mol-1's pair widths on cc 10.3 (still used by strict-FP32 trimul) | `cueq_tuning/` | `MOL_CUEQ_TUNING=0` |
 | Triton LayerNorm for pair tensors (2.4x faster than the extension at width 320/448 in BF16) | `triton_layer_norm.py` | `MOL_TRITON_LN=0` |
 | Transition: one GEMM for both up-projections, fused SwiGLU, contiguous row chunks | `primitives.py`, `triton_swiglu.py` | `MOL_FUSED_TRANSITION=0` |
@@ -142,14 +145,18 @@ time per call from nsys, `--enable_tf32 true`:
 | Module (calls per prediction) | SOL | Start of this round | Now | Now / SOL |
 | --- | --- | --- | --- | --- |
 | Pairformer triangle attention, C=320, 10 heads (1,600) | 0.59 ms (exp) | 2.03 ms + 0.92 ms of transposes per block pair | 1.86 ms | 3.1x |
-| Pairformer triangle multiplication, C=320 (1,600) | 0.34 ms (GEMM) | 1.25 ms | 1.10 ms | 3.3x |
+| Pairformer triangle multiplication, C=320 (1,600) | 0.34 ms (GEMM) | 1.25 ms | 0.77 ms (CuTe DSL kernels; 1.10 ms without) | 2.3x |
 | Pairformer transition, C=320 (800) | 0.50 ms (GEMM) | 1.36 ms | 0.84 ms | 1.7x |
-| PairMixer triangle multiplication, C=448 (320) | 0.61 ms | 1.86 ms | 1.58 ms | 2.6x |
+| PairMixer triangle multiplication, C=448 (320) | 0.61 ms | 1.86 ms | 1.21 ms (1.58 ms without) | 2.0x |
 | PairMixer transition, C=448 (160) | 0.99 ms | 2.07 ms | 1.44 ms | 1.5x |
 | Diffusion stage, per step (200) | 1.45 ms (TF32, token transformer) | about 10 ms | 5.5 ms (whole stage, wall) | |
 
 Kernel time on 9fm7 is now 10.3 s: Pairformer stack 6.5 s, MSA module
-1.7 s, diffusion 1.2 s, confidence head 0.54 s, template embedder 0.29 s.
+1.7 s, diffusion 1.2 s, confidence head 0.54 s, template embedder 0.29 s
+(before the CuTe DSL triangle multiplication kernels, which take 0.73 s off
+the trunk: forward 10.17 -> 9.44 s; outputs within the run-to-run spread,
+per-sample RMSD 0.06-0.17 A and pTM delta 4e-4 against a baseline whose own
+rerun differs by 0.06-0.53 A and 8e-4).
 Remaining gaps, largest first:
 
 - Triangle attention: the CUTLASS kernel takes 1.21 ms of the 1.86 ms. At
@@ -162,12 +169,14 @@ Remaining gaps, largest first:
   0.12 ms, output GEMM 0.11 ms and the bias gather into [H, N, N] (a Triton
   kernel, 9-12 us; `permute().contiguous()` took 19 us starting-node and
   50 us ending-node at C=320, 30 / 91 us at C=448).
-- Triangle multiplication: gated projection 0.34 ms, triangular einsum
-  0.23 ms (cuBLAS batched GEMM at 0.8 PFLOPS), two LayerNorm transposes
-  0.21 ms, output GEMMs 0.17 ms, output gating 0.16 ms. Fusing the output
-  gating into a dual-input GEMM was tried: with Triton 3.8 the
-  warp-specialized form fails to compile with two accumulators, and without
-  warp specialization it is slower than cuBLAS.
+- Triangle multiplication (C=320, with the CuTe DSL kernels): input LayerNorm
+  0.09 ms, gated projection 0.21 ms, triangular einsum 0.24 / 0.20 ms
+  (outgoing / incoming, cuBLAS batched GEMM), LayerNorm statistics 0.05 ms,
+  fused output side 0.19 ms. The output kernel is bound by its epilogue (a
+  128 x 160 subtile takes about 1.5-2 us, and with three 160-column TMEM
+  slots the next subtile's second GEMM waits for it); the einsum is at about
+  0.75 PF on the tensor cores and limited by L2-to-SM traffic (each 840 KB
+  channel operand is read by three tiles).
 - Diffusion: about 420 kernels per step (was 1,290) after fusing the token
   and atom transformer blocks. The token attention takes 21.1 us per call on
   FA4 (about 0.1 s per prediction; it was 67-74 us in Triton) against a
@@ -234,6 +243,33 @@ N=648, 10 heads, 0.93 ms per call; all correct, none faster):
   elements, `tcgen05.ld.red` row max and FA4's s0/s1 exp-phase barrier all
   made it no faster or slower). The code is on the local branch
   `wip-tri-fa4-splitkey`.
+
+Kernel work that did not pay off (fourth round, triangle multiplication):
+
+- Triangular einsum as a CuTe DSL kernel: CTA pairs with a 256-row band of
+  a[c] resident in shared memory (all 648 of K) and b[c] streamed: 235 / 232
+  us (outgoing / incoming) vs 225 / 194 us for cuBLAS; with only three 16 KB
+  stages left for b it is starved, and the 176 KB band reload is exposed at
+  every band. The DSL's persistent batched GEMM example reaches 197 / 203 us
+  (2-CTA 256 x 224 / 256 x 256 tiles); multicast clusters (2,2), (4,1), (2,4)
+  were slower. 648 = 5 x 128 + 8 wastes 16% of every M tile.
+- Folding the per-position LayerNorm statistics into the einsum is blocked by
+  the reduction over channels across CTAs (atomics per element per channel).
+- In the fused output kernel: L2 prefetch (TMA prefetch) of the next tile's
+  operands made it slower (231 -> 302 us); five 64-column subtiles (eight
+  TMEM slots) are slower (225 us, five reads of each operand); a 4-warp
+  epilogue with 255 registers still spilled the prefetched residual; tanh in
+  bf16x2 (half the MUFU work) gained nothing; splitting the epilogue into a
+  P phase and a G phase (P GEMM first, P slot released early) gained nothing
+  (197 us). What mattered: 256-bit residual loads and output stores (partial
+  sectors doubled the L2 write requests, 255 -> 194 us), and keeping the
+  residual prefetch in packed Int32 registers without a branch, because ptxas
+  otherwise waits for the load right after issuing it (an unpacking move or a
+  stack store), exposing 2-3 us of DRAM latency per subtile.
+- In the projection kernel: one 16-bit store per output from registers costs
+  more than all the math (233 vs 169 us with math only); staging through
+  shared memory with TMA stores or 32-byte transposed stores both land at
+  214-216 us, the write traffic itself (537 MB) being the remaining cost.
 
 Kernel work that did not pay off (third round):
 
