@@ -159,7 +159,9 @@ Remaining gaps, largest first:
   1.13 ms; FA4 itself, without bias or gate, takes 0.81 ms, and CUTLASS's
   example kernel 1.16 ms, so most of the gain is FA4's pipeline); the rest is the
   projection GEMM (0.36 ms, writing 1.1 GB of q/k/v/gate/bias), LayerNorm
-  0.12 ms, output GEMM 0.11 ms and the bias copy into [H, N, N] (0.05 ms).
+  0.12 ms, output GEMM 0.11 ms and the bias gather into [H, N, N] (a Triton
+  kernel, 9-12 us; `permute().contiguous()` took 19 us starting-node and
+  50 us ending-node at C=320, 30 / 91 us at C=448).
 - Triangle multiplication: gated projection 0.34 ms, triangular einsum
   0.23 ms (cuBLAS batched GEMM at 0.8 PFLOPS), two LayerNorm transposes
   0.21 ms, output GEMMs 0.17 ms, output gating 0.16 ms. Fusing the output
@@ -204,6 +206,34 @@ Kernel work that did not pay off (fourth round, FA4 token attention at
   tanh.approx (one MUFU op per two elements) saved another 0.6 us but lowered
   pLDDT on 9fm7 by 0.2 in two runs (run-to-run spread 0.1): small gates
   cancel in 0.5 + 0.5 tanh, so the gate stays FP32 ex2 + rcp.
+
+Kernel work that did not pay off (fourth round, FA4 triangle attention at
+N=648, 10 heads, 0.93 ms per call; all correct, none faster):
+
+- A clock64 trace of one CTA shows the two softmax warpgroups strictly
+  alternating: FA4's correction warps release the softmax-stats barrier
+  crosswise (stage 0's release frees stage 1), which makes stage 1 wait for
+  stage 0 every key block. Releasing per stage lets both run at once and
+  makes the traced CTA 18% faster, but the kernel time does not move
+  (0.925 ms).
+- The pair-bias MMAs as one inline-PTX block instead of eight `cute.gemm`
+  calls: 0.928 ms. Skipping the bias MMAs entirely: 0.85 ms (the bias costs
+  about 80 us, TMA plus tensor core).
+- Two S/P buffers per q stage in TMEM (n_block 96 or 64, so 4 S + 2 O fit in
+  512 columns), the QK MMA of block i + 2 issued right after the PV MMA of
+  block i, O rescaled by the softmax warps themselves (no correction warps
+  in the loop), one MMA warp per q stage: 1.02 ms. S is then always ready,
+  and the softmax warps become the limit.
+- On top of that, split keys: two softmax warpgroups per q stage (even and
+  odd key blocks, each with its own O accumulator and running max/sum,
+  merged in the epilogue), 16 softmax warps at 104 registers: 1.08 ms. Twice
+  the warps, the same per-SM softmax throughput, about 12 elements per clock
+  per SM, while ncu shows MUFU at 38%, the tensor pipe at 46-56% and issue
+  slots at 45%. The exponentials are not the limit (ex2 runs at 32 per clock
+  per SM on GB300, measured; FA4's ex2 emulation for 1/6 to 1/2 of the
+  elements, `tcgen05.ld.red` row max and FA4's s0/s1 exp-phase barrier all
+  made it no faster or slower). The code is on the local branch
+  `wip-tri-fa4-splitkey`.
 
 Kernel work that did not pay off (third round):
 

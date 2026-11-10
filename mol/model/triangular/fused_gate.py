@@ -67,3 +67,37 @@ def sigmoid_gate_transpose(o: torch.Tensor, g: torch.Tensor, transposed: bool = 
         H=h, D=d, BLOCK_Q=block_q, BLOCK_C=block_c, num_warps=4,
     )
     return y
+
+
+@triton.jit
+def _bias_heads_kernel(
+    P, B, N, p_row, p_col, H: tl.constexpr, HP: tl.constexpr, TRANSPOSED: tl.constexpr,
+    BLOCK_A: tl.constexpr, BLOCK_B: tl.constexpr,
+):
+    a = tl.program_id(0) * BLOCK_A + tl.arange(0, BLOCK_A)
+    b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
+    h = tl.arange(0, HP)
+    if TRANSPOSED:
+        row = b[None, :, None] * N + a[:, None, None]
+    else:
+        row = a[:, None, None] * N + b[None, :, None]
+    m = (a[:, None, None] < N) & (b[None, :, None] < N) & (h[None, None, :] < H)
+    x = tl.load(P + row.to(tl.int64) * p_row + h[None, None, :] * p_col, mask=m)
+    out = B + h[None, None, :].to(tl.int64) * N * N + a[:, None, None] * N + b[None, :, None]
+    tl.store(out, x, mask=m)
+
+
+def bias_heads(proj_bias: torch.Tensor, transposed: bool = False) -> torch.Tensor:
+    """[N, N, H] column slice of the projection -> contiguous [H, N, N] bias,
+    out[h, a, b] = p[a, b, h] (``transposed``: p[b, a, h]). One pass at memory
+    speed; ``permute(...).contiguous()`` takes 2-3x longer, the transposed case
+    most."""
+    n, n2, h = proj_bias.shape
+    assert n == n2 and proj_bias.stride(0) == n * proj_bias.stride(1)
+    out = torch.empty((h, n, n), device=proj_bias.device, dtype=proj_bias.dtype)
+    grid = (triton.cdiv(n, 32), triton.cdiv(n, 64))
+    _bias_heads_kernel[grid](
+        proj_bias, out, n, proj_bias.stride(1), proj_bias.stride(2), H=h, HP=triton.next_power_of_2(h),
+        TRANSPOSED=transposed, BLOCK_A=32, BLOCK_B=64, num_warps=4,
+    )
+    return out

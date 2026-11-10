@@ -165,6 +165,16 @@ class TriangleFastPathTest(unittest.TestCase):
             self.skipTest("needs Blackwell and the CuTe DSL with flash-attn-4")
         self._check_tri_kernel(fa4, tf)
 
+    def test_bias_heads(self):
+        from mol.model.triangular.fused_gate import bias_heads
+
+        for n, h in ((72, 4), (136, 10), (200, 14)):
+            proj = torch.randn(n, n, 5 * h * 8 + h + 3, device="cuda", dtype=torch.bfloat16)
+            p = proj[..., 7 : 7 + h]
+            for transposed in (False, True):
+                ref = p.permute((2, 1, 0) if transposed else (2, 0, 1)).contiguous()
+                self.assertTrue(torch.equal(bias_heads(p, transposed=transposed), ref))
+
     def test_key_prefix(self):
         import mol.model.triangular.triangular as tri
 
