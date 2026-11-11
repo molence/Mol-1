@@ -133,7 +133,7 @@ python bench/peaks.py                                                         # 
 ```
 
 Nsight Systems: `bench/nsys.sh <gpu> <tag> -- <runner args>` (Slurm
-allocation in `JOBID`) traces the last repeat with an NVTX range per stage
+allocation in `JOBID`, container image in `MOL_IMAGE`) traces the last repeat with an NVTX range per stage
 and per module (`MOL_BENCH_NVTX=1`; diffusion graph replays are traced per
 node). Then
 
