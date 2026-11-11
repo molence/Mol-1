@@ -150,7 +150,7 @@ def gated_projection_ok(x: torch.Tensor, in_weight: torch.Tensor) -> bool:
         and x.dtype in (torch.bfloat16, torch.float16)
         and x.shape[-1] % _GP_BLOCK_K == 0
         and (in_weight.shape[0] // 2) % GATE_BLOCK == 0
-        and torch.cuda.get_device_capability(x.device)[0] >= 10
+        and torch.cuda.get_device_capability(x.device)[0] == 10  # sm_100/103 only: tuned for and tested on data-center Blackwell
     )
 
 

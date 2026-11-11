@@ -88,7 +88,7 @@ def swiglu_matmul_ok(x: torch.Tensor, f: int) -> bool:
         and x.is_contiguous()
         and x.shape[1] % _SWIGLU_BLOCK_K == 0
         and f % SWIGLU_BLOCK_F == 0
-        and torch.cuda.get_device_capability(x.device)[0] >= 10
+        and torch.cuda.get_device_capability(x.device)[0] == 10  # sm_100/103 only: tuned for and tested on data-center Blackwell
     )
 
 

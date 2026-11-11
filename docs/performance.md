@@ -79,6 +79,12 @@ gains from the trunk changes only.
 
 ## What changed
 
+The Blackwell kernels (FA4, CUTLASS and CuTe DSL, and the Triton TMA /
+warp-specialized GEMMs and attention) are enabled on compute capability 10.x
+(B200, GB200, GB300) only. Other GPUs, including RTX PRO 6000 Blackwell (12.0),
+take the earlier paths (cuBLAS, cuEquivariance, the plain Triton kernels);
+the architecture-independent changes still apply there.
+
 All of these apply at inference only (no autograd) on CUDA, keep the
 existing path for training, and can be switched off with the environment
 variable listed, for comparison or if one misbehaves.

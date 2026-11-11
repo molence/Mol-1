@@ -156,7 +156,7 @@ def _tma_attention(q4, k4, v4, b, lead, m, n, d, gate=None, out=None, key_mask=N
     whose leading dims are 1 or match), else None. gate/out: optional
     [*lead, m, d] views (any strides, unit last) for the output gate and the
     output."""
-    if torch.cuda.get_device_capability(q4.device)[0] < 10 or d > 64 or b is None:
+    if torch.cuda.get_device_capability(q4.device)[0] != 10 or d > 64 or b is None:
         return None
     b4 = _as_4d(b)
     if b4.shape[-2:] != (m, n) or any(bs not in (1, ls) for bs, ls in zip(b4.shape[:2], lead)):
