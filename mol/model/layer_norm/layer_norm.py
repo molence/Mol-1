@@ -42,6 +42,7 @@ from typing import Any, Optional, Union
 import torch
 from torch.nn.parameter import Parameter
 
+from mol.model.layer_norm import triton_layer_norm
 from mol.model.layer_norm.build_utils import (
     ExtensionBuildInfo,
     collect_extension_build_info,
@@ -304,6 +305,8 @@ class FusedLayerNorm(torch.nn.Module):
             return _torch_layer_norm(
                 input, self.normalized_shape, self.weight, self.bias, self.eps
             )
+        if len(self.normalized_shape) == 1 and triton_layer_norm.enabled(input):
+            return triton_layer_norm.layer_norm(input, self.weight, self.bias, self.eps)
         return FusedLayerNormAffineFunction.apply(
             input, self.weight, self.bias, self.normalized_shape, self.eps
         )

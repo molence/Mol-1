@@ -42,6 +42,12 @@ inference_configs = {
     # FP32 matrix multiplications stay FP32; true runs them on TF32 tensor
     # cores, 4-8% faster with slightly different results.
     "enable_tf32": False,
+    # Up to 2560 tokens the confidence head and diffusion sampling run in FP32
+    # (BF16 above). True runs them under BF16 autocast at every size: on GB300
+    # with 644 tokens the confidence head goes from 0.95 s to 0.32 s, at
+    # slightly different results.
+    "bf16_confidence_head": False,
+    "bf16_sample_diffusion": False,
     "enable_efficient_fusion": True,
     "enable_diffusion_shared_vars_cache": True,
     "diffusion_cache_mode": "full",  # full | shared | off

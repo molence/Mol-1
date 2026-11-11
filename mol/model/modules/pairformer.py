@@ -20,6 +20,7 @@
 # Changes: Added the PairMixer block and the width adapter into the Pairformer stack; MSA row chunking.
 
 # pylint: disable=C0114
+import os
 from functools import partial
 from typing import Any, Optional
 
@@ -32,6 +33,7 @@ from mol.model.modules.primitives import LinearNoBias, Transition
 from mol.model.modules.transformer import AttentionPairBias
 from mol.model.modules.fused_ops import dropout_add_rowwise
 from mol.model.triangular.layers import DropoutRowwise, LayerNorm, OuterProductMean
+from mol.model.triangular.triangular import _tri_pad_amount
 from mol.model.triangular.triangular import (
     TriangleAttention,
     TriangleMultiplicationIncoming,
@@ -43,6 +45,47 @@ from mol.model.utils import (
     get_checkpoint_fn,
     sample_msa_feature_dict_random_without_replacement,
 )
+
+
+def _unpad_pair(z: torch.Tensor, n_token: int) -> torch.Tensor:
+    """View of the real tokens of a pair tensor padded by PairformerStack."""
+    if z.shape[-2] == n_token:
+        return z
+    return z[..., :n_token, :n_token, :]
+
+
+def _pad_pair_for_triangle_ops(z, pair_mask, triangle_multiplicative, triangle_attention):
+    """Pad [N, N, C] z (and the pair mask) to the multiple of tokens the
+    cuEquivariance triangle kernels want, once for a run of triangle ops
+    instead of in every op (see _tri_pad_amount). Returns (z, pair_mask, pad)."""
+    pad = (
+        _tri_pad_amount(z)
+        if z.dim() == 3
+        and "cuequivariance" in (triangle_multiplicative, triangle_attention)
+        else 0
+    )
+    if pad:
+        n_token = z.shape[-2]
+        z = F.pad(z, (0, 0, 0, pad, 0, pad))
+        if pair_mask is None:
+            pair_mask = z.new_ones((n_token, n_token))
+        pair_mask = F.pad(pair_mask, (0, pad, 0, pad))
+    return z, pair_mask, pad
+
+
+def _fused_triangle_attention(
+    block, z, pair_mask, triangle_attention, chunk_size, inplace_safe=False
+):
+    """z after starting- and ending-node triangle attention with their residual
+    adds, on the inference fast path (no transposes of z); None if it does not apply."""
+    z_new = block.tri_att_start.fused_residual_update(
+        z, pair_mask, triangle_attention, chunk_size, ending=False, inplace_safe=inplace_safe
+    )
+    if z_new is None:
+        return None
+    return block.tri_att_end.fused_residual_update(
+        z_new, pair_mask, triangle_attention, chunk_size, ending=True, inplace_safe=True
+    )
 
 
 class PairformerBlock(nn.Module):
@@ -160,22 +203,28 @@ class PairformerBlock(nn.Module):
                 _add_with_inplace=True,
                 triangle_multiplicative=triangle_multiplicative,
             )
-            z += self.tri_att_start(
-                z,
-                mask=pair_mask,
-                triangle_attention=triangle_attention,
-                inplace_safe=inplace_safe,
-                chunk_size=chunk_size,
+            z_att = _fused_triangle_attention(
+                self, z, pair_mask, triangle_attention, chunk_size, inplace_safe=True
             )
-            z = z.transpose(-2, -3).contiguous()
-            z += self.tri_att_end(
-                z,
-                mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
-                triangle_attention=triangle_attention,
-                inplace_safe=inplace_safe,
-                chunk_size=chunk_size,
-            )
-            z = z.transpose(-2, -3).contiguous()
+            if z_att is not None:
+                z = z_att
+            else:
+                z += self.tri_att_start(
+                    z,
+                    mask=pair_mask,
+                    triangle_attention=triangle_attention,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+                z = z.transpose(-2, -3).contiguous()
+                z += self.tri_att_end(
+                    z,
+                    mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
+                    triangle_attention=triangle_attention,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                )
+                z = z.transpose(-2, -3).contiguous()
             z += self.pair_transition(z, chunk_size=pair_transition_chunk_size)
         else:
             tmu_update = self.tri_mul_out(
@@ -196,39 +245,47 @@ class PairformerBlock(nn.Module):
             )
             z = dropout_add_rowwise(z, tmu_update, self.p_drop, self.training)
             del tmu_update
-            z = dropout_add_rowwise(
-                z,
-                self.tri_att_start(
+            z_att = None
+            if not self.training:
+                z_att = _fused_triangle_attention(
+                    self, z, pair_mask, triangle_attention, chunk_size
+                )
+            if z_att is not None:
+                z = z_att
+            else:
+                z = dropout_add_rowwise(
                     z,
-                    mask=pair_mask,
-                    triangle_attention=triangle_attention,
-                    inplace_safe=inplace_safe,
-                    chunk_size=chunk_size,
-                ),
-                self.p_drop,
-                self.training,
-            )
-            z = z.transpose(-2, -3).contiguous()
-            z = dropout_add_rowwise(
-                z,
-                self.tri_att_end(
+                    self.tri_att_start(
+                        z,
+                        mask=pair_mask,
+                        triangle_attention=triangle_attention,
+                        inplace_safe=inplace_safe,
+                        chunk_size=chunk_size,
+                    ),
+                    self.p_drop,
+                    self.training,
+                )
+                z = z.transpose(-2, -3).contiguous()
+                z = dropout_add_rowwise(
                     z,
-                    mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
-                    triangle_attention=triangle_attention,
-                    inplace_safe=inplace_safe,
-                    chunk_size=chunk_size,
-                ),
-                self.p_drop,
-                self.training,
-            )
-            z = z.transpose(-2, -3).contiguous()
+                    self.tri_att_end(
+                        z,
+                        mask=pair_mask.transpose(-1, -2) if pair_mask is not None else None,
+                        triangle_attention=triangle_attention,
+                        inplace_safe=inplace_safe,
+                        chunk_size=chunk_size,
+                    ),
+                    self.p_drop,
+                    self.training,
+                )
+                z = z.transpose(-2, -3).contiguous()
 
             z = z + self.pair_transition(z, chunk_size=pair_transition_chunk_size)
         if self.c_s > 0:
             s = s + self.attention_pair_bias(
                 a=s,
                 s=None,
-                z=z,
+                z=_unpad_pair(z, s.shape[-2]),
             )
             s = s + self.single_transition(s)
         return s, z
@@ -334,7 +391,7 @@ class PairMixerBlock(nn.Module):
             s = s + self.attention_pair_bias(
                 a=s,
                 s=None,
-                z=z,
+                z=_unpad_pair(z, s.shape[-2]),
             )
             s = s + self.single_transition(s)
         return s, z
@@ -556,6 +613,13 @@ class PairformerStack(nn.Module):
                 [..., N_token, c_s]
                 [..., N_token, N_token, c_z]
         """
+        # Pad the pair tensor once for the whole stack instead of in every
+        # triangle op (see _tri_pad_amount); padded pairs are masked out.
+        n_token = z.shape[-2]
+        z, pair_mask, pad = _pad_pair_for_triangle_ops(
+            z, pair_mask, triangle_multiplicative, triangle_attention
+        )
+
         blocks = self._prep_blocks(
             pair_mask=pair_mask,
             triangle_multiplicative=triangle_multiplicative,
@@ -574,6 +638,8 @@ class PairformerStack(nn.Module):
             args=(s, z),
             blocks_per_ckpt=blocks_per_ckpt,
         )
+        if pad:
+            z = z[..., :n_token, :n_token, :].contiguous()
         return s, z
 
 
@@ -884,7 +950,11 @@ class MSABlock(nn.Module):
         if not self.is_last_block:
             # MSA stack
             m = self.msa_stack(m, z, msa_chunk_size=msa_chunk_size)
-        # Pair stack
+        # Pair stack, on a padded pair tensor (see _pad_pair_for_triangle_ops)
+        n_token = z.shape[-2]
+        z, pair_mask, pad = _pad_pair_for_triangle_ops(
+            z, pair_mask, triangle_multiplicative, triangle_attention
+        )
         _, z = self.pair_stack(
             s=None,
             z=z,
@@ -895,6 +965,8 @@ class MSABlock(nn.Module):
             chunk_size=chunk_size,
             pair_transition_chunk_size=pair_transition_chunk_size,
         )
+        if pad:
+            z = z[..., :n_token, :n_token, :].contiguous()
         if not self.is_last_block:
             return m, z
         else:
@@ -1145,6 +1217,21 @@ class MSAModule(nn.Module):
         return z
 
 
+# Inference: templates with identical features (the padding templates when a
+# chain has fewer than the maximum, all four slots when there are no templates)
+# go through the template Pairformer once, and the z-independent template
+# projection is computed once per prediction instead of once per cycle. The
+# outputs are bit-identical. MOL_DEDUP_TEMPLATES=0 disables.
+_DEDUP_TEMPLATES = os.getenv("MOL_DEDUP_TEMPLATES", "1") != "0"
+_TEMPLATE_FEATURE_KEYS = (
+    "template_aatype",
+    "template_distogram",
+    "template_pseudo_beta_mask",
+    "template_unit_vector",
+    "template_backbone_frame_mask",
+)
+
+
 class TemplateEmbedder(nn.Module):
     """
     Implements Algorithm 16 in AF3
@@ -1217,6 +1304,7 @@ class TemplateEmbedder(nn.Module):
         triangle_multiplicative: str = "torch",
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        cycle_cache: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1228,6 +1316,10 @@ class TemplateEmbedder(nn.Module):
             triangle_attention: Triangle attention implementation type.
                 - "torch" (default): PyTorch native implementation
                 - "triattention": Optimized tri-attention module
+            cycle_cache (dict, optional): inference only, an empty dict shared by
+                the calls of one prediction (one per recycling cycle) with the
+                same input features; enables the deduplicated path
+                (_dedup_forward). None (training) keeps the reference path.
 
         Returns:
             torch.Tensor: the template feature
@@ -1245,10 +1337,34 @@ class TemplateEmbedder(nn.Module):
         num_templates = input_feature_dict["template_aatype"].shape[0]
         query_num_channels = z.shape[-1]
 
+        # The cached projections assume the default all-ones pair mask.
+        dedup = (
+            _DEDUP_TEMPLATES
+            and cycle_cache is not None
+            and pair_mask is None
+        )
         if pair_mask is None:
             pair_mask = z.new_ones(z.shape[:-1])
 
         z = self.layernorm_z(z)
+        if (
+            dedup
+            and not self.training
+            and not torch.is_grad_enabled()
+        ):
+            u = self._dedup_forward(
+                input_feature_dict,
+                z,
+                pair_mask,
+                multichain_mask,
+                cycle_cache,
+                triangle_attention=triangle_attention,
+                triangle_multiplicative=triangle_multiplicative,
+                inplace_safe=inplace_safe,
+                chunk_size=chunk_size,
+            )
+            assert u.shape == (num_residues, num_residues, query_num_channels)
+            return u
         u = 0
         for template_id in range(num_templates):
             u = u + self.single_template_forward(
@@ -1279,6 +1395,79 @@ class TemplateEmbedder(nn.Module):
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
+        a = self._template_projection(
+            template_id, input_feature_dict, z.shape[0], pair_mask, multichain_mask
+        )
+        v = self.linear_no_bias_z(z) + a
+        return self._template_stack(
+            v,
+            pair_mask,
+            triangle_attention=triangle_attention,
+            triangle_multiplicative=triangle_multiplicative,
+            inplace_safe=inplace_safe,
+            chunk_size=chunk_size,
+        )
+
+    def _dedup_forward(
+        self,
+        input_feature_dict: dict[str, Any],
+        z: torch.Tensor,
+        pair_mask: torch.Tensor,
+        multichain_mask: torch.Tensor,
+        cycle_cache: dict,
+        **stack_kwargs,
+    ) -> torch.Tensor:
+        """forward() after layernorm_z, at inference, bit-identical to the loop
+        over templates: each distinct template (by its input features) goes
+        through the stack once, linear_no_bias_z(z) is shared by the templates,
+        and the z-independent linear_no_bias_a(template features) is kept in
+        cycle_cache for the next cycles. The sum over templates keeps the
+        reference order (u = 0 + v_0 + v_1 + ...)."""
+        num_templates = input_feature_dict["template_aatype"].shape[0]
+        key = (z.shape[0], z.dtype, z.device, torch.get_autocast_dtype(z.device.type),
+               torch.is_autocast_enabled(z.device.type))
+        if cycle_cache.get("key") != key:
+            # One comparison of the template features per prediction (a host sync).
+            rep = []
+            for t in range(num_templates):
+                rep.append(t)
+                for r in sorted(set(rep[:-1])):
+                    if all(
+                        torch.equal(input_feature_dict[k][t], input_feature_dict[k][r])
+                        for k in _TEMPLATE_FEATURE_KEYS
+                    ):
+                        rep[-1] = r
+                        break
+            projections = {
+                r: self._template_projection(
+                    r, input_feature_dict, z.shape[0], pair_mask, multichain_mask
+                )
+                for r in sorted(set(rep))
+            }
+            cycle_cache.clear()
+            cycle_cache.update(key=key, rep=rep, projections=projections)
+        rep, projections = cycle_cache["rep"], cycle_cache["projections"]
+
+        zp = self.linear_no_bias_z(z)
+        outputs = {
+            r: self._template_stack(zp + a, pair_mask, **stack_kwargs)
+            for r, a in projections.items()
+        }
+        u = 0
+        for t in range(num_templates):
+            u = u + outputs[rep[t]]
+        u = u / (1e-7 + num_templates)
+        return self.linear_no_bias_u(self.relu(u))
+
+    def _template_projection(
+        self,
+        template_id: int,
+        input_feature_dict: dict[str, Any],
+        n_token: int,
+        pair_mask: torch.Tensor,
+        multichain_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """linear_no_bias_a of one template's pair features (independent of z)."""
         to_concat = []
 
         dgram = input_feature_dict["template_distogram"][
@@ -1296,8 +1485,8 @@ class TemplateEmbedder(nn.Module):
 
         aatype = input_feature_dict["template_aatype"][template_id]  # [N_token]
         aatype = F.one_hot(aatype, num_classes=len(STD_RESIDUES_WITH_GAP))
-        to_concat.append(expand_at_dim(aatype, dim=-3, n=z.shape[0]))
-        to_concat.append(expand_at_dim(aatype, dim=-2, n=z.shape[0]))
+        to_concat.append(expand_at_dim(aatype, dim=-3, n=n_token))
+        to_concat.append(expand_at_dim(aatype, dim=-2, n=n_token))
 
         unit_vector = input_feature_dict["template_unit_vector"][template_id]
         unit_vector = (
@@ -1312,7 +1501,17 @@ class TemplateEmbedder(nn.Module):
         to_concat.append(backbone_mask_2d.unsqueeze(-1))
 
         at = torch.concat(to_concat, dim=-1)
-        v = self.linear_no_bias_z(z) + self.linear_no_bias_a(at)
+        return self.linear_no_bias_a(at)
+
+    def _template_stack(
+        self,
+        v: torch.Tensor,
+        pair_mask: torch.Tensor,
+        triangle_attention: str = "torch",
+        triangle_multiplicative: str = "torch",
+        inplace_safe: bool = False,
+        chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
         _, v = self.pairformer_stack(
             s=None,
             z=v,

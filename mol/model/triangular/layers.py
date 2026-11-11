@@ -20,6 +20,7 @@
 # Changes: Automatic triangle-kernel selection from the device and the kernels available.
 # Copyright 2021 AlQuraishi Laboratory
 
+import contextlib
 import functools
 import importlib
 import logging
@@ -119,9 +120,27 @@ def _calculate_fan(
     return f
 
 
+_SKIP_TRUNC_NORMAL_INIT = False
+
+
+@contextlib.contextmanager
+def skip_trunc_normal_init():
+    """Skip the truncated-normal weight init while building a model whose
+    weights are about to be overwritten by a strict checkpoint load. The
+    SciPy sampler takes ~45 s for Mol-1's 577M parameters."""
+    global _SKIP_TRUNC_NORMAL_INIT
+    previous, _SKIP_TRUNC_NORMAL_INIT = _SKIP_TRUNC_NORMAL_INIT, True
+    try:
+        yield
+    finally:
+        _SKIP_TRUNC_NORMAL_INIT = previous
+
+
 def trunc_normal_init_(
     weights: torch.Tensor, scale: float = 1.0, fan: str = "fan_in"
 ) -> None:
+    if _SKIP_TRUNC_NORMAL_INIT:
+        return
     shape = weights.shape
     f = _calculate_fan(shape, fan)
     scale = scale / max(1, f)
@@ -718,6 +737,15 @@ class OuterProductMean(nn.Module):
     def _opm(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         # [*, N_res, N_res, C, C]
         outer = torch.einsum("...bac,...dae->...bdce", a, b)
+
+        if outer.dim() == 4 and outer.is_cuda and not outer.is_contiguous():
+            # einsum returns a [b, d, c, e] view of a [b, c, d, e] product;
+            # copy it into place with a bandwidth-bound kernel.
+            from mol.model.triangular.triton_permute import swap12, swap12_ok
+
+            src = outer.permute(0, 2, 1, 3)
+            if swap12_ok(src):
+                outer = swap12(src)
 
         # [*, N_res, N_res, C * C]
         outer = outer.reshape(outer.shape[:-2] + (-1,))

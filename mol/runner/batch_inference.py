@@ -192,6 +192,14 @@ MEMORY_CHUNK_SETTINGS = {
 }
 
 
+# Precision of the stages that run in FP32 up to 2560 tokens; BF16 is faster
+# with slightly different results (see mol/config/inference.py).
+PRECISION_SETTINGS = {
+    "bf16_confidence_head": "Run the confidence head in BF16 at every input size.",
+    "bf16_sample_diffusion": "Run diffusion sampling in BF16 at every input size.",
+}
+
+
 def inference_default(path: str) -> Any:
     """Return the default of a dotted config path as inference sees it."""
     node: Any = {**configs_base, **inference_configs}
@@ -251,6 +259,14 @@ def memory_options(command: Any) -> Any:
             f"Default: {inference_default('infer_setting.dynamic_chunk_size')}."
         ),
     )(command)
+    for path, text in reversed(PRECISION_SETTINGS.items()):
+        command = click.option(
+            f"--{path}",
+            path.replace(".", "__"),
+            type=bool,
+            default=None,
+            help=f"{text} Default: {inference_default(path)}.",
+        )(command)
     for path, text in reversed(MEMORY_CHUNK_SETTINGS.items()):
         command = click.option(
             f"--{path}",
@@ -272,7 +288,7 @@ def memory_settings_from_options(options: Mapping[str, Any]) -> dict:
         value = options[path.replace(".", "__")]
         if value is not None:
             settings[path] = parse_chunk_size(path, value)
-    for path in ("infer_setting.dynamic_chunk_size", "diffusion_cache_mode"):
+    for path in ("infer_setting.dynamic_chunk_size", "diffusion_cache_mode", *PRECISION_SETTINGS):
         value = options[path.replace(".", "__")]
         if value is not None:
             settings[path] = value
@@ -639,8 +655,9 @@ def mol_cli() -> None:
     type=bool,
     default=False,
     help=(
-        "Run FP32 matrix multiplications on TF32 tensor cores: 4-8% faster, "
-        "with slightly different results."
+        "Run FP32 matrix multiplications on TF32 tensor cores, with slightly "
+        "different results. Mostly speeds up diffusion sampling and the "
+        "confidence head, which run in FP32 up to 2560 tokens."
     ),
 )
 @click.option(
