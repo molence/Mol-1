@@ -28,6 +28,29 @@ from mol.web_service.colab_request_parser import RequestParser
 logger = get_logger(__name__)
 
 
+def chain_needs_msa(protein_chain: dict) -> bool:
+    """Whether THIS protein chain needs an MSA search.
+
+    True when it carries no MSA path at all, or carries one that is not on disk.
+    """
+    paired_msa_path = protein_chain.get("pairedMsaPath")
+    unpaired_msa_path = protein_chain.get("unpairedMsaPath")
+
+    if paired_msa_path is None and unpaired_msa_path is None:
+        return True
+    if paired_msa_path is not None and not os.path.exists(paired_msa_path):
+        logger.warning(
+            f"pairedMsaPath {paired_msa_path} does not exist, will re-search MSA."
+        )
+        return True
+    if unpaired_msa_path is not None and not os.path.exists(unpaired_msa_path):
+        logger.warning(
+            f"unpairedMsaPath {unpaired_msa_path} does not exist, will re-search MSA."
+        )
+        return True
+    return False
+
+
 def need_msa_search(json_data: dict) -> bool:
     """
     Check if the input JSON data needs an MSA search.
@@ -38,31 +61,13 @@ def need_msa_search(json_data: dict) -> bool:
     Returns:
         bool: True if an MSA search is required, False otherwise.
     """
-    need_msa = False
     # the new format of msa filed is `pairedMsaPath` and `unpairedMsaPath`
     # we need to check `pairedMsaPath` and `unpairedMsaPath`
-    for sequence in json_data["sequences"]:
-        if "proteinChain" in sequence:
-            protein_chain = sequence["proteinChain"]
-            paired_msa_path = protein_chain.get("pairedMsaPath")
-            unpaired_msa_path = protein_chain.get("unpairedMsaPath")
-
-            if paired_msa_path is None and unpaired_msa_path is None:
-                need_msa = True
-            else:
-                if paired_msa_path is not None and not os.path.exists(paired_msa_path):
-                    logger.warning(
-                        f"pairedMsaPath {paired_msa_path} does not exist, will re-search MSA."
-                    )
-                    need_msa = True
-                if unpaired_msa_path is not None and not os.path.exists(
-                    unpaired_msa_path
-                ):
-                    logger.warning(
-                        f"unpairedMsaPath {unpaired_msa_path} does not exist, will re-search MSA."
-                    )
-                    need_msa = True
-    return need_msa
+    return any(
+        chain_needs_msa(sequence["proteinChain"])
+        for sequence in json_data["sequences"]
+        if "proteinChain" in sequence
+    )
 
 
 def convert_msa_to_new_format(
@@ -171,6 +176,13 @@ def update_seq_msa(infer_seq: dict, msa_res_dir: str) -> dict:
         protein_msa_res = dict(zip(protein_seqs, msa_res_subdirs))
         for sequence in infer_seq["sequences"]:
             if "proteinChain" in sequence.keys():
+                # A task needs a search when ANY chain lacks an MSA, but the result must only
+                # be written to the chains that actually lacked one: overwriting every chain
+                # silently discards a caller's own MSA. That is easy to miss, because the
+                # search succeeds and the run completes -- a binder deliberately given a
+                # single-sequence a3m comes back folded against a deep one, with no warning.
+                if not chain_needs_msa(sequence["proteinChain"]):
+                    continue
                 precomputed_msa_dir = protein_msa_res[
                     sequence["proteinChain"]["sequence"]
                 ]

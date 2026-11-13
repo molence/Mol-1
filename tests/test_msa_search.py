@@ -103,3 +103,49 @@ class MsaSearchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrecomputedMsaIsKeptTest(unittest.TestCase):
+    """A chain that already carries an MSA must keep it when a sibling chain needs a search."""
+
+    def test_search_for_one_chain_does_not_overwrite_another_chains_msa(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(colab_request_parser, "run_mmseqs2_service", side_effect=fake_service):
+            mine = os.path.join(d, "mine.a3m")
+            with open(mine, "w") as f:
+                f.write(">query\nMKAAA\n")
+            task = {"name": "t", "sequences": [
+                {"proteinChain": {"sequence": "MKAAA", "count": 1,
+                                  "unpairedMsaPath": mine, "pairedMsaPath": mine}},
+                {"proteinChain": {"sequence": "MKCCC", "count": 1}},
+            ]}
+            msa_search.update_seq_msa(task, d)
+            kept = task["sequences"][0]["proteinChain"]
+            searched = task["sequences"][1]["proteinChain"]
+            self.assertEqual(kept["unpairedMsaPath"], mine)
+            self.assertEqual(kept["pairedMsaPath"], mine)
+            self.assertTrue(os.path.isfile(searched["unpairedMsaPath"]))
+
+    def test_chain_needs_msa(self):
+        with tempfile.TemporaryDirectory() as d:
+            there = os.path.join(d, "a.a3m")
+            with open(there, "w") as f:
+                f.write(">query\nMKAAA\n")
+            self.assertFalse(msa_search.chain_needs_msa({"unpairedMsaPath": there}))
+            self.assertTrue(msa_search.chain_needs_msa({}))
+            self.assertTrue(
+                msa_search.chain_needs_msa({"unpairedMsaPath": os.path.join(d, "no.a3m")})
+            )
+
+    def test_task_still_searches_when_any_chain_lacks_an_msa(self):
+        with tempfile.TemporaryDirectory() as d:
+            there = os.path.join(d, "a.a3m")
+            with open(there, "w") as f:
+                f.write(">query\nMKAAA\n")
+            self.assertTrue(msa_search.need_msa_search({"sequences": [
+                {"proteinChain": {"sequence": "MKAAA", "unpairedMsaPath": there}},
+                {"proteinChain": {"sequence": "MKCCC"}},
+            ]}))
+            self.assertFalse(msa_search.need_msa_search({"sequences": [
+                {"proteinChain": {"sequence": "MKAAA", "unpairedMsaPath": there}},
+            ]}))
